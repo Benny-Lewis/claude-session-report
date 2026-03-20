@@ -499,7 +499,23 @@ def collect_for_summarization(all_sessions, max_collect, refresh):
     }
 
 
+def _validate_report_path(filepath):
+    """Validate that filepath is within ~/.claude/reports/."""
+    try:
+        resolved = Path(filepath).resolve()
+        allowed = REPORT_DIR.resolve()
+        if not str(resolved).startswith(str(allowed) + os.sep) and resolved != allowed:
+            print(f"Error: file path must be within {REPORT_DIR}")
+            return False
+    except (OSError, ValueError) as e:
+        print(f"Error validating file path: {e}")
+        return False
+    return True
+
+
 def update_cache_from_file(filepath):
+    if not _validate_report_path(filepath):
+        return False
     try:
         with open(filepath, "r", encoding="utf-8") as f:
             new_entries = json.load(f)
@@ -566,6 +582,8 @@ def prepare_review_data(all_sessions, summaries):
 
 def update_statuses_from_file(filepath):
     """Update only the status field for existing cache entries."""
+    if not _validate_report_path(filepath):
+        return False
     try:
         with open(filepath, "r", encoding="utf-8") as f:
             corrections = json.load(f)
@@ -703,7 +721,7 @@ def generate_html(all_sessions, summaries, days):
             status_parts.append(f'{f_counts["complete"]} complete')
         if f_counts.get("unknown", 0):
             status_parts.append(f'{f_counts["unknown"]} unsummarized')
-        status_breakdown = " \u00b7 ".join(status_parts) if status_parts else f"{len(sessions)} sessions"
+        status_breakdown = " \u00b7 ".join(status_parts) if status_parts else f'{len(sessions)} session{"s" if len(sessions) != 1 else ""}'
 
         # Build session rows
         session_parts = []
@@ -1072,7 +1090,7 @@ body {{
   <div class="status-group"><span class="dot" style="background:var(--complete)"></span> <strong>{n_complete}</strong> complete</div>
   {"<div class='status-group'><span class='dot' style='background:var(--unknown)'></span> <strong>" + str(n_unknown) + "</strong> unsummarized</div>" if n_unknown else ""}
   <span class="status-sep"></span>
-  <span class="status-total">{len(all_sessions)} sessions &middot; {len(by_project)} folders &middot; {total_msgs:,} messages</span>
+  <span class="status-total">{len(all_sessions)} session{"s" if len(all_sessions) != 1 else ""} &middot; {len(by_project)} folder{"s" if len(by_project) != 1 else ""} &middot; {total_msgs:,} messages</span>
 </div>
 
 <div class="controls">
@@ -1372,7 +1390,7 @@ def main():
     parser.add_argument("--limit", type=int, default=0, help="Max sessions to scan (0 = unlimited)")
     parser.add_argument("--collect", action="store_true", help="Output JSON of sessions needing summaries")
     parser.add_argument("--collect-file", type=str, default=None, help="Path for collect output")
-    parser.add_argument("--max-collect", type=int, default=15, help="Max sessions to collect for summarization (default: 15)")
+    parser.add_argument("--max-collect", type=int, default=50, help="Max sessions to collect for summarization (default: 50)")
     parser.add_argument("--update-cache", type=str, default=None, metavar="FILE", help="Merge summaries from a JSON file into the cache")
     parser.add_argument("--review-statuses", action="store_true", help="Output folder-grouped summaries for cross-session status review")
     parser.add_argument("--update-statuses", type=str, default=None, metavar="FILE", help="Apply status corrections from a JSON file")
