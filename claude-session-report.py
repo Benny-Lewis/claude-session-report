@@ -27,9 +27,11 @@ Usage:
 """
 
 import json
+import os
 import sys
 import re
 import argparse
+import tempfile
 import webbrowser
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -58,7 +60,7 @@ STATUS_LABELS = {
     "blocked": "Blocked",
     "handed_off": "Handed Off",
     "complete": "Complete",
-    "unknown": "Unknown",
+    "unknown": "Unsummarized",
 }
 STATUS_ORDER = {"blocked": 0, "in_progress": 1, "handed_off": 2, "unknown": 3, "complete": 4}
 
@@ -76,12 +78,16 @@ def load_summary_cache() -> dict:
         return {}
 
 
-def save_summary_cache(cache: dict):
+def save_summary_cache(cache: dict) -> bool:
     try:
-        with open(CACHE_FILE, "w", encoding="utf-8") as f:
+        fd, tmp_path = tempfile.mkstemp(dir=CACHE_FILE.parent, suffix=".tmp")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(cache, f, indent=2, ensure_ascii=False)
+        Path(tmp_path).replace(CACHE_FILE)
+        return True
     except OSError as e:
         print(f"  WARNING: Failed to write cache: {e}")
+        return False
 
 
 def get_cached_data(cache, session_id, msg_count, latest_ts):
@@ -517,7 +523,8 @@ def update_cache_from_file(filepath):
         }
         merged += 1
 
-    save_summary_cache(cache)
+    if not save_summary_cache(cache):
+        return False
     print(f"  Merged {merged} summary(ies) into cache")
     return True
 
@@ -580,7 +587,8 @@ def update_statuses_from_file(filepath):
                 updated += 1
 
     if updated > 0:
-        save_summary_cache(cache)
+        if not save_summary_cache(cache):
+            return False
     print(f"  Updated {updated} session status(es)")
     return True
 
@@ -599,9 +607,9 @@ def md_to_html(text):
             html_lines.append("</ul>")
             in_list = False
         if stripped.startswith("## "):
-            html_lines.append(f"<h4>{html_escape(stripped[3:])}</h4>")
+            html_lines.append(f"<h3>{html_escape(stripped[3:])}</h3>")
         elif stripped.startswith("# "):
-            html_lines.append(f"<h3>{html_escape(stripped[2:])}</h3>")
+            html_lines.append(f"<h2>{html_escape(stripped[2:])}</h2>")
         elif stripped.startswith("- ") or stripped.startswith("* "):
             if not in_list:
                 html_lines.append("<ul>")
@@ -674,11 +682,28 @@ def generate_html(all_sessions, summaries, days):
 
         folder_status_pills = ""
         if f_counts.get("in_progress", 0):
-            folder_status_pills += f'<span class="fpill progress">{f_counts["in_progress"]}</span>'
+            n = f_counts["in_progress"]
+            folder_status_pills += f'<span class="fpill progress" title="{n} in progress">{n}</span>'
         if f_counts.get("blocked", 0):
-            folder_status_pills += f'<span class="fpill blocked">{f_counts["blocked"]}</span>'
+            n = f_counts["blocked"]
+            folder_status_pills += f'<span class="fpill blocked" title="{n} blocked">{n}</span>'
         if f_counts.get("handed_off", 0):
-            folder_status_pills += f'<span class="fpill handed">{f_counts["handed_off"]}</span>'
+            n = f_counts["handed_off"]
+            folder_status_pills += f'<span class="fpill handed" title="{n} handed off">{n}</span>'
+
+        # Status breakdown for folder info
+        status_parts = []
+        if f_counts.get("in_progress", 0):
+            status_parts.append(f'{f_counts["in_progress"]} active')
+        if f_counts.get("blocked", 0):
+            status_parts.append(f'{f_counts["blocked"]} blocked')
+        if f_counts.get("handed_off", 0):
+            status_parts.append(f'{f_counts["handed_off"]} handed off')
+        if f_counts.get("complete", 0):
+            status_parts.append(f'{f_counts["complete"]} complete')
+        if f_counts.get("unknown", 0):
+            status_parts.append(f'{f_counts["unknown"]} unsummarized')
+        status_breakdown = " \u00b7 ".join(status_parts) if status_parts else f"{len(sessions)} sessions"
 
         # Build session rows
         session_parts = []
@@ -701,11 +726,8 @@ def generate_html(all_sessions, summaries, days):
                         parts.append(f'<p class="raw-resp"><strong>Last response:</strong> {html_escape(truncate(clean, 300))}</p>')
                 detail_body = "\n".join(parts)
 
-            time_range = f'{format_timestamp(s["earliest"])} &rarr; {format_timestamp(s["latest"])}'
-            meta_line = f'{s["user_msg_count"]} user / {s["assistant_msg_count"]} assistant &middot; {sid[:12]}'
-
             session_parts.append(f"""<div class="session" data-status="{status}">
-  <div class="session-row" onclick="toggleSession(this)">
+  <div class="session-row" onclick="toggleSession(this)" onkeydown="handleKey(event,this,toggleSession)" role="button" tabindex="0" aria-expanded="false">
     <span class="badge {status}">{STATUS_LABELS.get(status, status)}</span>
     <span class="session-title">{title}</span>
     <span class="session-time">{time_short}</span>
@@ -714,23 +736,37 @@ def generate_html(all_sessions, summaries, days):
   </div>
   <div class="session-detail">
     <div class="session-detail-inner">
-      <div class="detail-meta">{time_range} &middot; {meta_line}</div>
+      <div class="detail-meta">
+        <span class="meta-time">{format_timestamp(s["earliest"])} &rarr; {format_timestamp(s["latest"])}</span>
+        <span class="meta-sep"></span>
+        <span class="meta-msgs">{s["user_msg_count"]} user / {s["assistant_msg_count"]} assistant</span>
+        <span class="meta-sep"></span>
+        <button class="meta-id" onclick="event.stopPropagation();navigator.clipboard.writeText('{sid}');this.textContent='Copied!';setTimeout(()=>this.textContent='{sid[:8]}…',1200)" title="Click to copy full ID: {sid}">{sid[:8]}&hellip;</button>
+      </div>
       <div class="detail-body">{detail_body}</div>
     </div>
   </div>
 </div>""")
 
-        folder_parts.append(f"""<section class="folder" data-folder="{html_escape(sf)}">
-  <div class="folder-header" onclick="toggleFolder(this)">
+        n_complete_folder = f_counts.get("complete", 0)
+        completed_toggle = ""
+        has_non_complete = len(sessions) - n_complete_folder > 0
+        if n_complete_folder > 0:
+            label = f'{n_complete_folder} completed session{"s" if n_complete_folder != 1 else ""}'
+            completed_toggle = f'<button class="show-completed-toggle" onclick="toggleCompleted(this)">{label}</button>'
+
+        folder_parts.append(f"""<section class="folder{' completed-hidden' if n_complete_folder > 0 and has_non_complete else ''}" data-folder="{html_escape(sf)}" data-complete-count="{n_complete_folder}">
+  <div class="folder-header" onclick="toggleFolder(this)" onkeydown="handleKey(event,this,toggleFolder)" role="button" tabindex="0" aria-expanded="false">
     <span class="folder-arrow"></span>
     <span class="folder-path">{html_escape(sf)}</span>
     <div class="folder-meta">
       {folder_status_pills}
-      <span class="folder-info">{len(sessions)} sessions &middot; {total_folder_msgs:,} msgs &middot; {latest_ts}</span>
+      <span class="folder-info">{status_breakdown} &middot; {latest_ts}</span>
     </div>
   </div>
   <div class="folder-body">
     {''.join(session_parts)}
+    {completed_toggle}
   </div>
 </section>""")
 
@@ -738,6 +774,7 @@ def generate_html(all_sessions, summaries, days):
 <html lang="en" data-theme="dark">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Session Report &mdash; Last {days} day(s)</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -835,7 +872,7 @@ body {{
 /* ── Controls ──────────────────────────────────────────── */
 .controls {{
   display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
-  margin-bottom: 20px;
+  margin-bottom: 36px;
 }}
 .chip {{
   background: transparent; border: 1px solid var(--border); color: var(--text-2);
@@ -860,13 +897,14 @@ body {{
   width: 170px; outline: none; transition: border-color 0.15s;
 }}
 .search-input:focus {{ border-color: var(--text-3); }}
+.search-input:focus-visible {{ outline: 2px solid var(--progress); outline-offset: 2px; }}
 .bulk-btns {{ display: flex; gap: 4px; }}
 .bulk-btn {{
-  background: transparent; border: 1px solid var(--border); color: var(--text-3);
-  padding: 4px 10px; border-radius: 6px; font-size: 0.7rem; cursor: pointer;
+  background: var(--surface); border: 1px solid var(--border); color: var(--text-2);
+  padding: 5px 10px; border-radius: 8px; font-size: 0.75rem; cursor: pointer;
   font-family: inherit; transition: all 0.15s;
 }}
-.bulk-btn:hover {{ background: var(--surface-hover); color: var(--text-2); }}
+.bulk-btn:hover {{ background: var(--surface-hover); color: var(--text); }}
 .bulk-btn:focus-visible {{ outline: 2px solid var(--progress); outline-offset: 2px; }}
 
 /* ── Empty state ───────────────────────────────────────── */
@@ -887,13 +925,14 @@ body {{
   padding: 11px 4px; cursor: pointer; user-select: none;
 }}
 .folder-header:hover {{ background: var(--surface-hover); border-radius: 6px; }}
+.folder-header:focus-visible {{ outline: 2px solid var(--progress); outline-offset: 2px; border-radius: 6px; }}
 .folder-arrow {{
   width: 16px; height: 16px; display: grid; place-items: center;
   font-size: 10px; color: var(--text-3); transition: transform 0.15s;
 }}
 .folder-arrow::before {{ content: "\\25B6"; }}
 .folder.open .folder-arrow {{ transform: rotate(90deg); }}
-.folder-path {{ font-weight: 600; font-size: 0.88rem; flex: 1; }}
+.folder-path {{ font-weight: 600; font-size: 1rem; flex: 1; }}
 .folder-meta {{ display: flex; align-items: center; gap: 6px; }}
 .fpill {{
   display: inline-flex; align-items: center; justify-content: center;
@@ -903,7 +942,7 @@ body {{
 .fpill.progress {{ background: var(--progress-bg); color: var(--progress); }}
 .fpill.blocked {{ background: var(--blocked-bg); color: var(--blocked); }}
 .fpill.handed {{ background: var(--handed-bg); color: var(--handed); }}
-.folder-info {{ font-size: 0.73rem; color: var(--text-3); }}
+.folder-info {{ font-size: 0.75rem; color: var(--text-3); }}
 .folder-body {{ display: none; padding: 0 0 6px 0; }}
 .folder.open .folder-body {{ display: block; }}
 
@@ -916,10 +955,11 @@ body {{
   transition: background 0.1s;
 }}
 .session-row:hover {{ background: var(--surface-hover); }}
+.session-row:focus-visible {{ outline: 2px solid var(--progress); outline-offset: 2px; }}
 .badge {{
   display: inline-flex; align-items: center;
   padding: 2px 10px; border-radius: 4px;
-  font-size: 0.65rem; font-weight: 600; text-transform: uppercase;
+  font-size: 0.7rem; font-weight: 600; text-transform: uppercase;
   letter-spacing: 0.03em; white-space: nowrap; flex-shrink: 0;
   min-width: 78px; justify-content: center;
 }}
@@ -930,7 +970,7 @@ body {{
 .badge.unknown {{
   background: transparent; color: var(--unknown);
   border: 1px dashed var(--border); font-weight: 400;
-  text-transform: none; letter-spacing: 0; font-size: 0.62rem;
+  text-transform: none; letter-spacing: 0; font-size: 0.7rem;
   min-width: 78px;
 }}
 .session-title {{
@@ -941,8 +981,8 @@ body {{
 .session[data-status="complete"] .session-title,
 .session[data-status="handed_off"] .session-title {{ color: var(--text-2); }}
 .session[data-status="unknown"] .session-title {{ color: var(--text-2); }}
-.session-time {{ font-size: 0.73rem; color: var(--text-3); white-space: nowrap; flex-shrink: 0; }}
-.session-msgs {{ font-size: 0.7rem; color: var(--text-3); white-space: nowrap; flex-shrink: 0; min-width: 52px; text-align: right; }}
+.session-time {{ font-size: 0.75rem; color: var(--text-3); white-space: nowrap; flex-shrink: 0; }}
+.session-msgs {{ font-size: 0.75rem; color: var(--text-3); white-space: nowrap; flex-shrink: 0; min-width: 52px; text-align: right; }}
 .session-chevron {{
   width: 14px; height: 14px; flex-shrink: 0; display: grid; place-items: center;
   font-size: 8px; color: var(--text-3); transition: transform 0.2s cubic-bezier(0.16,1,0.3,1);
@@ -958,19 +998,58 @@ body {{
 .session.expanded .session-detail {{ grid-template-rows: 1fr; }}
 .session-detail-inner {{ overflow: hidden; }}
 .session-detail-inner > div {{ padding: 6px 28px 14px; }}
-.detail-meta {{ font-size: 0.7rem; color: var(--text-3); margin-bottom: 10px; padding-top: 6px; border-top: 1px solid var(--border); }}
+.detail-meta {{
+  display: flex; align-items: center; gap: 0; flex-wrap: wrap;
+  font-size: 0.75rem; color: var(--text-3); margin-bottom: 10px;
+  padding-top: 6px; border-top: 1px solid var(--border);
+}}
+.meta-sep {{ width: 1px; height: 12px; background: var(--border); margin: 0 10px; flex-shrink: 0; }}
+.meta-id {{
+  background: none; border: none; color: var(--text-3); font-family: 'SFMono-Regular','Cascadia Code',Consolas,monospace;
+  font-size: 0.7rem; cursor: pointer; padding: 1px 4px; border-radius: 3px; transition: all 0.15s;
+}}
+.meta-id:hover {{ background: var(--surface-hover); color: var(--text-2); }}
 .detail-body {{ font-size: 0.82rem; line-height: 1.65; color: var(--text-2); }}
-.detail-body h3 {{ font-size: 0.85rem; font-weight: 600; color: var(--text); margin: 14px 0 4px; }}
-.detail-body h4 {{ font-size: 0.82rem; font-weight: 600; color: var(--text); margin: 12px 0 4px; }}
+.detail-body h2 {{ font-size: 0.85rem; font-weight: 600; color: var(--text); margin: 14px 0 4px; }}
+.detail-body h3 {{ font-size: 0.88rem; font-weight: 600; color: var(--text); margin: 12px 0 4px; }}
 .detail-body ul {{ margin: 4px 0 8px 18px; }}
 .detail-body li {{ margin-bottom: 3px; }}
 .detail-body p {{ margin: 4px 0; }}
 .detail-body code {{ background: var(--code-bg); padding: 1px 5px; border-radius: 3px; font-size: 0.76rem; color: var(--code-text); font-family: 'SFMono-Regular','Cascadia Code',Consolas,monospace; }}
 .detail-body strong {{ color: var(--text); font-weight: 600; }}
 .raw-ask, .raw-resp {{ color: var(--text-2); }}
+.session[data-status="unknown"] .detail-body {{
+  border-left: 3px solid var(--border); padding-left: 14px; margin-left: 2px;
+}}
+
+/* ── Completed session collapsing ─────────────────────── */
+.folder.completed-hidden .session[data-status="complete"] {{ display: none; }}
+.show-completed-toggle {{
+  width: 100%; padding: 6px 28px;
+  background: none; border: none; border-top: 1px dashed var(--border);
+  color: var(--text-3); font-size: 0.75rem; font-family: inherit;
+  cursor: pointer; text-align: left; margin-top: 2px; transition: color 0.15s;
+}}
+.show-completed-toggle:hover {{ color: var(--text-2); }}
+.show-completed-toggle:focus-visible {{ outline: 2px solid var(--progress); outline-offset: 2px; }}
+.folder.completed-hidden .show-completed-toggle::before {{ content: "\\25B6  "; font-size: 0.6rem; }}
+.folder:not(.completed-hidden) .show-completed-toggle::before {{ content: "\\25BC  "; font-size: 0.6rem; }}
 
 /* ── Footer ────────────────────────────────────────────── */
 .footer {{ color: var(--text-3); font-size: 0.7rem; margin-top: 40px; padding-top: 16px; border-top: 1px solid var(--border); }}
+
+/* ── Responsive ───────────────────────────────────────── */
+@media (max-width: 768px) {{
+  .wrap {{ padding: 16px 12px; }}
+  .header {{ flex-wrap: wrap; gap: 8px; }}
+  .status-strip {{ gap: 12px; }}
+  .controls {{ flex-direction: column; align-items: stretch; gap: 8px; }}
+  .controls-right {{ margin-left: 0; flex-wrap: wrap; }}
+  .search-input {{ width: 100%; }}
+  .session-row {{ padding-left: 12px; gap: 6px; }}
+  .session-time, .session-msgs {{ display: none; }}
+  .folder-info {{ display: none; }}
+}}
 </style>
 </head>
 <body>
@@ -1059,10 +1138,17 @@ document.querySelectorAll('.folder').forEach(f => {{
     const hasHandedOff = [...sessions].some(s => s.dataset.status === 'handed_off');
     if (hasHandedOff) f.classList.add('open');
   }}
+  const header = f.querySelector('.folder-header');
+  if (header) header.setAttribute('aria-expanded', f.classList.contains('open'));
 }});
 
+function handleKey(e, el, fn) {{
+  if (e.key === 'Enter' || e.key === ' ') {{ e.preventDefault(); fn(el); }}
+}}
 function toggleFolder(header) {{
-  header.closest('.folder').classList.toggle('open');
+  const folder = header.closest('.folder');
+  folder.classList.toggle('open');
+  header.setAttribute('aria-expanded', folder.classList.contains('open'));
 }}
 function expandAllFolders() {{
   document.querySelectorAll('.folder').forEach(f => f.classList.add('open'));
@@ -1073,7 +1159,18 @@ function collapseAllFolders() {{
 
 /* Sessions */
 function toggleSession(row) {{
-  row.closest('.session').classList.toggle('expanded');
+  const session = row.closest('.session');
+  session.classList.toggle('expanded');
+  row.setAttribute('aria-expanded', session.classList.contains('expanded'));
+}}
+
+/* Completed session toggle */
+function toggleCompleted(btn) {{
+  const folder = btn.closest('.folder');
+  folder.classList.toggle('completed-hidden');
+  const n = folder.dataset.completeCount || 0;
+  const label = n + ' completed session' + (n == 1 ? '' : 's');
+  btn.textContent = label;
 }}
 
 /* Empty state */
@@ -1096,7 +1193,14 @@ function filterStatus(status, btn) {{
       s.classList.add('filter-hidden');
     }}
   }});
+  /* When filtering to complete, temporarily unhide completed sessions */
   document.querySelectorAll('.folder').forEach(f => {{
+    if (status === 'complete') {{
+      f.classList.remove('completed-hidden');
+    }} else if (status === 'all' && f.dataset.completeCount > 0) {{
+      const hasNonComplete = f.querySelectorAll('.session:not([data-status="complete"])').length > 0;
+      if (hasNonComplete) f.classList.add('completed-hidden');
+    }}
     const visible = f.querySelectorAll('.session:not(.filter-hidden):not(.search-hidden)');
     f.style.display = visible.length ? '' : 'none';
     if (visible.length) f.classList.add('open');
