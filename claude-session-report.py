@@ -671,6 +671,88 @@ def md_to_html(text):
     return "\n".join(html_lines)
 
 
+# Section accent colors (muted tinted neutrals — distinct from status colors)
+SECTION_STYLES = {
+    "what was done": ("oklch(0.55 0.03 55)", "done"),
+    "what was accomplished": ("oklch(0.55 0.03 55)", "done"),
+    "summary": ("oklch(0.55 0.03 55)", "done"),
+    "key decisions": ("oklch(0.50 0.025 200)", "decisions"),
+    "decisions made": ("oklch(0.50 0.025 200)", "decisions"),
+    "decisions": ("oklch(0.50 0.025 200)", "decisions"),
+    "issues encountered": ("oklch(0.52 0.035 25)", "issues"),
+    "issues": ("oklch(0.52 0.035 25)", "issues"),
+    "blockers": ("oklch(0.52 0.035 25)", "issues"),
+    "next steps": ("oklch(0.50 0.03 130)", "next"),
+    "what's next": ("oklch(0.50 0.03 130)", "next"),
+}
+
+# Sections that should be rendered as the "Next Steps" card instead of a color-coded block
+NEXT_STEPS_SECTIONS = {"next steps", "what's next"}
+
+
+def parse_summary_sections(summary_text):
+    """Parse summary markdown into structured sections for color-coded rendering.
+
+    Returns (sections_list, next_steps_entry_or_None).
+    sections_list: list of {label, css_class, color, html_content} dicts.
+    next_steps: a single {label, css_class, color, html} dict or None.
+    Falls back to a single 'Summary' section if no recognized headings found.
+    """
+    if not summary_text or summary_text.startswith("("):
+        return [], None
+
+    lines = summary_text.split("\n")
+    sections = []
+    current_label = None
+    current_lines = []
+
+    for line in lines:
+        stripped = line.strip()
+        heading_match = re.match(r'^#{1,3}\s+(.+)$', stripped)
+        if heading_match:
+            # Save previous section
+            if current_label is not None and current_lines:
+                sections.append((current_label, "\n".join(current_lines)))
+            current_label = heading_match.group(1).strip()
+            current_lines = []
+        else:
+            current_lines.append(line)
+
+    # Save final section
+    if current_label is not None and current_lines:
+        sections.append((current_label, "\n".join(current_lines)))
+
+    # If no headings found, treat entire text as one section
+    if not sections:
+        return [{
+            "label": "Summary",
+            "css_class": "done",
+            "color": "oklch(0.55 0.03 55)",
+            "html": md_to_html(summary_text),
+        }], None
+
+    result = []
+    next_steps = None
+    for label, content in sections:
+        label_lower = label.lower().strip()
+        color, css_class = SECTION_STYLES.get(label_lower, ("oklch(0.55 0.03 55)", "done"))
+        html = md_to_html(content)
+        if not html.strip():
+            continue
+        entry = {"label": label, "css_class": css_class, "color": color, "html": html}
+        # Separate "Next Steps" for special card rendering
+        if label_lower in NEXT_STEPS_SECTIONS:
+            next_steps = entry
+        else:
+            result.append(entry)
+
+    if not result:
+        result = [{"label": "Summary", "css_class": "done",
+                    "color": "oklch(0.55 0.03 55)", "html": md_to_html(summary_text)}]
+
+    return result, next_steps  # next_steps may be None
+
+
 def aggregate_projects(all_sessions, summaries, days):
     """Group sessions by project with computed metadata for the sidebar."""
     by_project = defaultdict(list)
