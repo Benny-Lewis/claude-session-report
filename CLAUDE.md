@@ -56,16 +56,16 @@ python claude-session-report.py 1 --no-open   # don't open browser
 
 ## Reading the Script
 
-`claude-session-report.py` is ~1460 lines — too large to read in one pass. Key sections:
-- Cache (~68–108), Helpers (~110–194), Session parsing (~196–400)
-- Transcript sampling (~403–434), Summaries/collect (~436–594)
-- Markdown/HTML rendering (~596–1256), Text output (~1260–1334), Main/CLI (~1336–1457)
+`claude-session-report.py` is ~1500 lines — too large to read in one pass. Key sections:
+- Cache (~75–115), Helpers (~117–200), Session parsing (~203–410)
+- Transcript sampling (~410–440), Summaries/collect (~443–620)
+- Markdown/HTML rendering (~621–1300), Text output (~1307–1380), Main/CLI (~1383–1502)
 
 ## Working with the HTML Template
 
 - The HTML template is embedded in `claude-session-report.py` as an f-string — all CSS `{` `}` must be doubled (`{{` `}}`)
-- Template sections: CSS (lines ~782–1053), HTML structure (~1054–1108), JS (~1109–1254)
-- `md_to_html()` (~591–623) converts summary markdown to HTML — heading levels here control the document's heading hierarchy
+- Template sections: CSS (lines ~800–1070), HTML structure (~1073–1140), JS (~1145–1300)
+- `md_to_html()` (~625–655) converts summary markdown to HTML — heading levels here control the document's heading hierarchy
 - Output HTML is ~1860 lines and 31k+ tokens — too large to read in one pass; read in chunks
 - To preview locally, use `start "" <path>` on Windows — the Chrome MCP prepends `https://` to `file:///` URLs
 - For Playwright MCP preview: `python -m http.server 8787 --directory ~/.claude/reports` then navigate to `localhost:8787/<filename>`

@@ -63,6 +63,13 @@ STATUS_LABELS = {
     "unknown": "Unsummarized",
 }
 STATUS_ORDER = {"blocked": 0, "in_progress": 1, "handed_off": 2, "unknown": 3, "complete": 4}
+STATUS_TOOLTIPS = {
+    "in_progress": "Actively being worked on",
+    "blocked": "Hit a blocker and paused",
+    "handed_off": "Ended expecting continuation in a new session",
+    "complete": "Work in this session is finished",
+    "unknown": "Not yet summarized by AI",
+}
 
 
 # ─── Cache ────────────────────────────────────────────────────────────────────
@@ -746,7 +753,7 @@ def generate_html(all_sessions, summaries, days):
 
             session_parts.append(f"""<div class="session" data-status="{status}">
   <div class="session-row" onclick="toggleSession(this)" onkeydown="handleKey(event,this,toggleSession)" role="button" tabindex="0" aria-expanded="false">
-    <span class="badge {status}">{STATUS_LABELS.get(status, status)}</span>
+    <span class="badge {status}" title="{STATUS_TOOLTIPS.get(status, '')}">{STATUS_LABELS.get(status, status)}</span>
     <span class="session-title">{title}</span>
     <span class="session-time">{time_short}</span>
     <span class="session-msgs">{msgs} msgs</span>
@@ -912,7 +919,7 @@ body {{
 .search-input {{
   background: var(--surface); border: 1px solid var(--border); color: var(--text);
   padding: 5px 12px; border-radius: 8px; font-size: 0.78rem; font-family: inherit;
-  width: 170px; outline: none; transition: border-color 0.15s;
+  min-width: 170px; flex: 1; outline: none; transition: border-color 0.15s;
 }}
 .search-input:focus {{ border-color: var(--text-3); }}
 .search-input:focus-visible {{ outline: 2px solid var(--progress); outline-offset: 2px; }}
@@ -1003,7 +1010,7 @@ body {{
 .session-msgs {{ font-size: 0.75rem; color: var(--text-3); white-space: nowrap; flex-shrink: 0; min-width: 52px; text-align: right; }}
 .session-chevron {{
   width: 14px; height: 14px; flex-shrink: 0; display: grid; place-items: center;
-  font-size: 8px; color: var(--text-3); transition: transform 0.2s cubic-bezier(0.16,1,0.3,1);
+  font-size: 10px; color: var(--text-3); transition: transform 0.2s cubic-bezier(0.16,1,0.3,1);
 }}
 .session-chevron::before {{ content: "\\25B6"; }}
 .session.expanded .session-chevron {{ transform: rotate(90deg); }}
@@ -1063,7 +1070,7 @@ body {{
   .status-strip {{ gap: 12px; }}
   .controls {{ flex-direction: column; align-items: stretch; gap: 8px; }}
   .controls-right {{ margin-left: 0; flex-wrap: wrap; }}
-  .search-input {{ width: 100%; }}
+  .search-input {{ min-width: 0; }}
   .session-row {{ padding-left: 12px; gap: 6px; }}
   .session-time, .session-msgs {{ display: none; }}
   .folder-info {{ display: none; }}
@@ -1084,10 +1091,10 @@ body {{
 </div>
 
 <div class="status-strip">
-  <div class="status-group"><span class="dot" style="background:var(--progress)"></span> <strong>{n_progress}</strong> in progress</div>
-  <div class="status-group"><span class="dot" style="background:var(--blocked)"></span> <strong>{n_blocked}</strong> blocked</div>
-  <div class="status-group"><span class="dot" style="background:var(--handed)"></span> <strong>{n_handed}</strong> handed off</div>
-  <div class="status-group"><span class="dot" style="background:var(--complete)"></span> <strong>{n_complete}</strong> complete</div>
+  <div class="status-group" title="Session is actively being worked on"><span class="dot" style="background:var(--progress)"></span> <strong>{n_progress}</strong> in progress</div>
+  <div class="status-group" title="Session hit a blocker and paused"><span class="dot" style="background:var(--blocked)"></span> <strong>{n_blocked}</strong> blocked</div>
+  <div class="status-group" title="Session ended expecting continuation in a new session"><span class="dot" style="background:var(--handed)"></span> <strong>{n_handed}</strong> handed off</div>
+  <div class="status-group" title="Work in this session is finished"><span class="dot" style="background:var(--complete)"></span> <strong>{n_complete}</strong> complete</div>
   {"<div class='status-group'><span class='dot' style='background:var(--unknown)'></span> <strong>" + str(n_unknown) + "</strong> unsummarized</div>" if n_unknown else ""}
   <span class="status-sep"></span>
   <span class="status-total">{len(all_sessions)} session{"s" if len(all_sessions) != 1 else ""} &middot; {len(by_project)} folder{"s" if len(by_project) != 1 else ""} &middot; {total_msgs:,} messages</span>
@@ -1120,7 +1127,7 @@ body {{
 </main>
 
 <div class="footer">
-  Summaries by Claude Code &middot; Cache: {str(CACHE_FILE)}
+  Summaries by Claude Code &middot; <details style="display:inline"><summary style="cursor:pointer;list-style:none">Technical details</summary>Cache: {str(CACHE_FILE)}</details>
 </div>
 
 </div>
@@ -1269,6 +1276,28 @@ function sortSessions(by) {{
     sessions.forEach(s => body.appendChild(s));
   }});
 }}
+
+/* Keyboard shortcuts */
+document.addEventListener('keydown', function(e) {{
+  const search = document.querySelector('.search-input');
+  if (!search) return;
+  const active = document.activeElement;
+  const isInput = active && (active.tagName === 'INPUT' || active.tagName === 'SELECT' || active.tagName === 'TEXTAREA');
+  if ((e.key === '/' && !isInput) || (e.key === 'k' && (e.ctrlKey || e.metaKey))) {{
+    e.preventDefault();
+    search.focus();
+  }}
+  if (e.key === 'Escape') {{
+    if (active === search && search.value) {{
+      search.value = '';
+      searchSessions('');
+      search.blur();
+    }} else if (activeFilter !== 'all') {{
+      const allChip = document.querySelector('.chip[data-status="all"]');
+      if (allChip) filterStatus('all', allChip);
+    }}
+  }}
+}});
 </script>
 </body>
 </html>"""
@@ -1407,6 +1436,7 @@ def main():
         return
 
     days = args.days
+    REPORT_DIR.mkdir(parents=True, exist_ok=True)
 
     print(f"\n{'='*80}")
     print(f"  CLAUDE CODE SESSION REPORT - Last {days} day(s)")
@@ -1418,7 +1448,7 @@ def main():
         print(f"No sessions with activity in the last {days} day(s).\n")
         if args.collect:
             output_path = args.collect_file or str(REPORT_DIR / "_collect.json")
-            REPORT_DIR.mkdir(parents=True, exist_ok=True)
+
             with open(output_path, "w", encoding="utf-8") as f:
                 json.dump({"sessions": [], "total_found": 0, "already_cached": 0, "too_short": 0, "needs_summary": 0}, f)
             print(f"  Collect output: {output_path}")
@@ -1431,7 +1461,6 @@ def main():
     if args.collect:
         data = collect_for_summarization(all_sessions, args.max_collect, args.refresh)
         output_path = args.collect_file or str(REPORT_DIR / "_collect.json")
-        REPORT_DIR.mkdir(parents=True, exist_ok=True)
         with open(output_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
         print(f"  Total sessions found: {data['total_found']}")
@@ -1447,7 +1476,6 @@ def main():
         summaries = load_cached_summaries(all_sessions, False)
         data = prepare_review_data(all_sessions, summaries)
         output_path = str(REPORT_DIR / "_review.json")
-        REPORT_DIR.mkdir(parents=True, exist_ok=True)
         with open(output_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
         print(f"  Folders needing cross-session review: {data['needs_review']}")
@@ -1460,7 +1488,6 @@ def main():
         print_text_report(all_sessions, summaries, days)
     else:
         html = generate_html(all_sessions, summaries, days)
-        REPORT_DIR.mkdir(parents=True, exist_ok=True)
         report_file = REPORT_DIR / f"session-report-{datetime.now().strftime('%Y%m%d-%H%M%S')}.html"
         with open(report_file, "w", encoding="utf-8") as f:
             f.write(html)
