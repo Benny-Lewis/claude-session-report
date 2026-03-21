@@ -2122,6 +2122,10 @@ def main():
     days = args.days
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
 
+    # Apply any status corrections from previous report
+    corrections = read_corrections_from_previous_report()
+    apply_corrections_to_cache(corrections)
+
     print(f"\n{'='*80}")
     print(f"  CLAUDE CODE SESSION REPORT - Last {days} day(s)")
     print(f"  Generated: {datetime.now().strftime('%Y-%m-%d %I:%M %p')}")
