@@ -1241,16 +1241,17 @@ body {{
   font-family: 'Outfit', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
   line-height: 1.55;
   -webkit-font-smoothing: antialiased;
-  height: 100vh;
+  height: 100dvh;
   overflow: hidden;
 }}
 
 /* ── Layout ────────────────────────────────────────────── */
-.layout {{ display: flex; height: 100vh; }}
+.layout {{ display: flex; height: 100dvh; }}
 
 /* ── Sidebar ───────────────────────────────────────────── */
 .sidebar {{
   width: clamp(260px, 18vw, 340px);
+  height: 100%;
   border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
@@ -1387,14 +1388,12 @@ body {{
 
 /* ── Detail Panel ──────────────────────────────────────── */
 .detail {{ flex: 1; overflow-y: auto; background: var(--bg); position: relative; }}
-/* Theme text button */
+/* Theme icon button */
 .theme-text-btn {{
-  background: none; border: none; color: var(--text-4); cursor: pointer;
-  font-size: 0.72rem; font-family: inherit; font-weight: 500; padding: 0;
-  text-decoration: underline; text-underline-offset: 2px;
-  transition: color 0.15s;
+  background: none; border: none; color: var(--text-3); cursor: pointer;
+  font-size: 1.1rem; padding: 2px 4px; transition: color 0.15s; line-height: 1;
 }}
-.theme-text-btn:hover {{ color: var(--text-2); }}
+.theme-text-btn:hover {{ color: var(--text); }}
 .detail-inner {{ max-width: 780px; padding: 40px 48px; }}
 .detail-header {{ margin-bottom: 32px; }}
 .detail-top-row {{
@@ -1633,7 +1632,7 @@ body {{
 
     <div class="sidebar-footer">
       {f'<label class="inactive-toggle"><input type="checkbox" checked onchange="toggleInactiveVisibility(this)" class="inactive-cb">{n_inactive_proj} inactive</label>' if n_inactive_proj > 0 else ''}
-      <button class="theme-text-btn" onclick="toggleTheme()"><span class="theme-label">Dark</span></button>
+      <button class="theme-text-btn" onclick="toggleTheme()" title="Toggle theme"><span class="theme-icon">&#9789;</span></button>
     </div>
   </div>
 
@@ -1671,8 +1670,7 @@ function toggleTheme() {{
 
 function updateThemeUI() {{
   const isDark = document.documentElement.getAttribute('data-theme') !== 'light';
-  document.querySelectorAll('.theme-icon').forEach(el => el.textContent = isDark ? '\\u2600' : '\\u263E');
-  document.querySelectorAll('.theme-label').forEach(el => el.textContent = isDark ? 'Light' : 'Dark');
+  document.querySelectorAll('.theme-icon').forEach(el => el.textContent = isDark ? '\\u2600' : '\\u263D');
 }}
 
 /* ── Sidebar Toggle ────────────────────────── */
