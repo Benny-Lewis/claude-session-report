@@ -114,6 +114,62 @@ def get_cached_data(cache, session_id, msg_count, latest_ts):
     return None
 
 
+def read_corrections_from_previous_report():
+    """Read status corrections embedded in the most recent report HTML.
+
+    Returns dict of {session_id: new_status} or empty dict.
+    """
+    if not REPORT_DIR.exists():
+        return {}
+    reports = sorted(REPORT_DIR.glob("session-report-*.html"), key=lambda f: f.stat().st_mtime, reverse=True)
+    if not reports:
+        return {}
+
+    try:
+        content = reports[0].read_text(encoding="utf-8")
+    except OSError:
+        return {}
+
+    # Extract JSON from <script type="application/json" id="status-corrections">
+    match = re.search(
+        r'<script\s+type="application/json"\s+id="status-corrections">\s*(\{.*?\})\s*</script>',
+        content, re.DOTALL
+    )
+    if not match:
+        return {}
+
+    try:
+        corrections = json.loads(match.group(1))
+        if isinstance(corrections, dict):
+            # Validate entries
+            valid = {}
+            for sid, status in corrections.items():
+                if isinstance(status, str) and status in STATUS_LABELS:
+                    valid[sid] = status
+            if valid:
+                print(f"  Found {len(valid)} status correction(s) from previous report")
+            return valid
+    except json.JSONDecodeError:
+        pass
+
+    return {}
+
+
+def apply_corrections_to_cache(corrections):
+    """Apply user corrections to the summary cache."""
+    if not corrections:
+        return
+    cache = load_summary_cache()
+    updated = 0
+    for sid, new_status in corrections.items():
+        if sid in cache and cache[sid].get("status") != new_status:
+            cache[sid]["status"] = new_status
+            updated += 1
+    if updated > 0:
+        save_summary_cache(cache)
+        print(f"  Applied {updated} status correction(s) to cache")
+
+
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
 
