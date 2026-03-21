@@ -79,7 +79,21 @@ Build a JSON object where each key is the session's `session_id` and each value 
 - `"latest_ts"`: copied VERBATIM from the collect data (do not modify)
 - `"folder"`: copied VERBATIM from the collect data (do not modify)
 
-Write this JSON object to `~/.claude/reports/_summaries.json`.
+When there are more than 10 sessions to summarize, split them into batches of ~10 and dispatch ALL batch subagents in a single message so they run in parallel. Each subagent writes its batch to a separate file (e.g., `_summaries_batch1.json`, `_summaries_batch2.json`).
+
+After all batches complete, merge them into a single `_summaries.json`. **CRITICAL (Windows encoding):** All `open()` calls in any merge script MUST use `encoding="utf-8"`. Example:
+
+```python
+import json, glob
+merged = {}
+for f in sorted(glob.glob(str(Path.home() / ".claude/reports/_summaries_batch*.json"))):
+    with open(f, encoding="utf-8") as fh:
+        merged.update(json.load(fh))
+with open(str(Path.home() / ".claude/reports/_summaries.json"), "w", encoding="utf-8") as fh:
+    json.dump(merged, fh, indent=2, ensure_ascii=False)
+```
+
+If there are 10 or fewer sessions, write directly to `~/.claude/reports/_summaries.json` (still using `encoding="utf-8"`).
 
 Then update the cache:
 
@@ -126,7 +140,7 @@ python "INSTALL_DIR/claude-session-report.py" $ARGUMENTS
 ### Step 5: Clean up
 
 ```bash
-rm -f ~/.claude/reports/_collect.json ~/.claude/reports/_summaries.json ~/.claude/reports/_review.json ~/.claude/reports/_status_corrections.json
+rm -f ~/.claude/reports/_collect.json ~/.claude/reports/_summaries.json ~/.claude/reports/_summaries_batch*.json ~/.claude/reports/_review.json ~/.claude/reports/_status_corrections.json
 ```
 
 Tell the user:

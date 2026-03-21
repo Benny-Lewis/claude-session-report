@@ -827,7 +827,9 @@ def aggregate_projects(all_sessions, summaries, days):
             s["_status"] = "unknown"
             s["_title"] = None
         if not s["_title"]:
-            s["_title"] = truncate(s["first_ask"], 80)
+            fallback_title = s.get("first_ask") or ""
+            fallback_title = re.sub(r'^#+\s+', '', fallback_title.lstrip())
+            s["_title"] = truncate(fallback_title, 80) if fallback_title else "(untitled)"
         by_project[s["cwd"] or s["project_path"]].append(s)
 
     projects = []
@@ -839,21 +841,26 @@ def aggregate_projects(all_sessions, summaries, days):
             status_counts[s["_status"]] += 1
 
         # Active/inactive: inactive if all sessions complete and latest > 24h ago
-        all_complete = all(s["_status"] in ("complete", "unknown") for s in sessions)
         latest_time = max(s["latest"] for s in sessions)
-        is_inactive = all_complete and latest_time < inactive_threshold
+        all_complete = all(s["_status"] in ("complete", "unknown", "handed_off") for s in sessions)
+        is_inactive = all_complete
 
         # Project-level status: simple active vs inactive (session-level statuses remain unchanged)
         project_status = "inactive" if is_inactive else "active"
 
         # Short name: last component of the path
-        short_name = short_path(folder).rstrip("/\\").split("/")[-1].split("\\")[-1]
-        # Initials: first two chars of first two words, or first two chars
-        parts = re.split(r'[-_]', short_name)
-        if len(parts) >= 2:
-            initials = (parts[0][0] + parts[1][0]).upper()
+        sp = short_path(folder)
+        if sp == "~":
+            short_name = "Home"
+            initials = "HM"
         else:
-            initials = short_name[:2].upper()
+            short_name = sp.rstrip("/\\").split("/")[-1].split("\\")[-1]
+            # Initials: first two chars of first two words, or first two chars
+            parts = re.split(r'[-_]', short_name)
+            if len(parts) >= 2:
+                initials = (parts[0][0] + parts[1][0]).upper()
+            else:
+                initials = short_name[:2].upper()
 
         projects.append({
             "folder": folder,
@@ -869,8 +876,8 @@ def aggregate_projects(all_sessions, summaries, days):
             "last_title": latest_session["_title"],
         })
 
-    # Sort: active first (by recency), then inactive (by recency)
-    active = sorted([p for p in projects if not p["is_inactive"]], key=lambda p: p["latest"], reverse=True)
+    # Sort: active first (by recency, Home deprioritized), then inactive (by recency)
+    active = sorted([p for p in projects if not p["is_inactive"]], key=lambda p: (p["name"] != "Home", p["latest"]), reverse=True)
     inactive = sorted([p for p in projects if p["is_inactive"]], key=lambda p: p["latest"], reverse=True)
 
     return active, inactive
@@ -882,7 +889,12 @@ def aggregate_projects(all_sessions, summaries, days):
 def generate_html(all_sessions, summaries, days):
     # ── Aggregate projects ──────────────────────────────────
     active_projects, inactive_projects = aggregate_projects(all_sessions, summaries, days)
-    all_projects = active_projects + inactive_projects
+    # Unified list sorted by recency (Home deprioritized)
+    all_projects = sorted(
+        active_projects + inactive_projects,
+        key=lambda p: (p["name"] != "Home", p["latest"]),
+        reverse=True
+    )
     total_projects = len(all_projects)
     now_str = datetime.now().strftime("%b %d, %Y %I:%M %p")
 
@@ -923,12 +935,27 @@ def generate_html(all_sessions, summaries, days):
             # Pre-render summary HTML
             sections_html = ""
             for sec in sections:
+                # Extract first bullet as collapsed preview
+                preview = ""
+                import re as _re
+                li_match = _re.search(r'<li[^>]*>(.*?)</li>', sec["html"], _re.DOTALL)
+                if li_match:
+                    preview_text = _re.sub(r'<[^>]+>', '', li_match.group(1)).strip()
+                    # Unescape HTML entities before re-escaping for the preview
+                    from html import unescape as _unescape
+                    preview_text = _unescape(preview_text)
+                    preview = html_escape(truncate(preview_text, 120))
+
                 sections_html += (
-                    '<div class="summary-block">'
+                    '<div class="summary-block collapsed" onclick="toggleSummaryBlock(this)">'
                     f'<div class="summary-bar" style="background:var(--section-{html_escape(sec["css_class"])})"></div>'
-                    '<div>'
+                    '<div class="summary-block-inner">'
+                    f'<div class="summary-block-header">'
                     f'<div class="summary-block-label" style="color:var(--section-{html_escape(sec["css_class"])})">{html_escape(sec["label"])}</div>'
-                    f'<div class="summary-block-content">{sec["html"]}</div>'
+                    f'<span class="summary-block-chevron">&#9656;</span>'
+                    f'</div>'
+                    f'<div class="summary-block-preview">{preview}</div>'
+                    f'<div class="summary-block-full"><div class="summary-block-content">{sec["html"]}</div></div>'
                     '</div></div>'
                 )
             next_steps_html = next_steps["html"] if next_steps else ""
@@ -945,7 +972,11 @@ def generate_html(all_sessions, summaries, days):
                 )
             elif not sections_html:
                 # Raw fallback for unsummarized sessions
-                fallback_parts = [f'<p><strong>Opening ask:</strong> {html_escape(truncate(s["first_ask"], 300))}</p>']
+                first_ask_text = s["first_ask"].strip() if s.get("first_ask") else ""
+                if first_ask_text:
+                    fallback_parts = [f'<p><strong>Opening ask:</strong> {html_escape(truncate(first_ask_text, 300))}</p>']
+                else:
+                    fallback_parts = [f'<p><strong>Opening ask:</strong> <em>(slash command)</em></p>']
                 if s.get("last_assistant"):
                     clean = clean_transcript_text(s["last_assistant"])
                     if clean and len(clean) > 10:
@@ -989,13 +1020,12 @@ def generate_html(all_sessions, summaries, days):
     projects_json_str = json.dumps(projects_json, ensure_ascii=False)
     projects_json_str = projects_json_str.replace("</script>", "<\\/script>")
 
-    # ── Count statuses for sidebar filter chips ─────────────
-    n_active = sum(1 for p in all_projects if p["status"] == "active")
+    # ── Count statuses ─────────────────────────
     n_inactive_proj = sum(1 for p in all_projects if p["status"] == "inactive")
 
-    # ── Build sidebar project items ─────────────────────────
-    sidebar_active_items = []
-    for i, proj in enumerate(active_projects):
+    # ── Build unified sidebar project list (all projects by recency) ──
+    sidebar_items = []
+    for i, proj in enumerate(all_projects):
         status = proj["status"]
         sv = STATUS_VAR.get(status, "text-3")
         name_esc = html_escape(proj["name"])
@@ -1003,61 +1033,26 @@ def generate_html(all_sessions, summaries, days):
         time_ago = _time_ago(proj["latest"])
         n_sess = proj["session_count"]
         selected = " selected" if i == 0 else ""
+        is_inactive = status == "inactive"
 
-        # Project-level status badge styling (active/inactive — not clickable)
-        badge_style = f'style="background:var(--{sv}-bg);color:var(--{sv})"'
-        label = "Active" if status == "active" else "Inactive"
+        if is_inactive:
+            badge_html = f'<span class="project-status project-status-inactive" onclick="showProjectStatusDropdown(this,{i},event)">Inactive <span class="dd">&#9660;</span></span>'
+        else:
+            badge_style = f'style="background:var(--{sv}-bg);color:var(--{sv})"'
+            badge_html = f'<span class="project-status" {badge_style} onclick="showProjectStatusDropdown(this,{i},event)">Active <span class="dd">&#9660;</span></span>'
 
-        sidebar_active_items.append(
-            f'<div class="project-item{selected}" data-project-index="{i}" '
+        sidebar_items.append(
+            f'<div class="project-item{selected}{" inactive" if is_inactive else ""}" data-project-index="{i}" '
             f'data-status="{status}" onclick="selectProject({i})">'
-            f'<div class="project-avatar">{html_escape(proj["initials"])}'
+            f'<div class="project-avatar"{" style=opacity:0.5" if is_inactive else ""}>{html_escape(proj["initials"])}'
             f'<div class="avatar-dot" style="background:var(--{sv})"></div></div>'
             f'<div class="project-name-row">'
             f'<span class="project-name">{name_esc}</span>'
-            f'<span class="project-status" {badge_style}>'
-            f'{label}</span>'
+            f'{badge_html}'
             f'</div>'
             f'<div class="project-last-session">{title_esc}</div>'
-            f'<div class="project-time">{html_escape(time_ago)} &middot; {n_sess} session{"s" if n_sess != 1 else ""}</div>'
+            f'<div class="project-time">{html_escape(time_ago)}</div>'
             f'</div>'
-        )
-
-    # Inactive items
-    sidebar_inactive_items = []
-    for j, proj in enumerate(inactive_projects):
-        i = len(active_projects) + j
-        status = proj["status"]
-        sv = STATUS_VAR.get(status, "text-3")
-        name_esc = html_escape(proj["name"])
-        title_esc = html_escape(proj["last_title"] or "")
-        time_ago = _time_ago(proj["latest"])
-
-        sidebar_inactive_items.append(
-            f'<div class="project-item" data-project-index="{i}" '
-            f'data-status="{status}" onclick="selectProject({i})">'
-            f'<div class="project-avatar" style="opacity:0.5">{html_escape(proj["initials"])}'
-            f'<div class="avatar-dot" style="background:var(--{sv})"></div></div>'
-            f'<div class="project-name-row">'
-            f'<span class="project-name">{name_esc}</span>'
-            f'<span class="project-time" style="margin:0;font-size:0.7rem">{html_escape(time_ago)}</span>'
-            f'</div>'
-            f'<div class="project-last-session">{title_esc}</div>'
-            f'</div>'
-        )
-
-    n_inactive = len(inactive_projects)
-    inactive_section = ""
-    if n_inactive > 0:
-        inactive_section = (
-            '<div class="inactive-section" id="inactiveSection">'
-            '<div class="inactive-toggle" onclick="toggleInactive()">'
-            '<span class="inactive-arrow">&#9654;</span>'
-            f'<span class="inactive-label">{n_inactive} inactive project{"s" if n_inactive != 1 else ""}</span>'
-            f'<div class="project-avatar" style="display:grid;width:28px;height:28px;font-size:0.65rem;background:var(--surface-2)">+{n_inactive}</div>'
-            '</div>'
-            f'<div class="inactive-list">{"".join(sidebar_inactive_items)}</div>'
-            '</div>'
         )
 
     # ── Build first project detail panel (server-side default) ──
@@ -1080,8 +1075,9 @@ def generate_html(all_sessions, summaries, days):
             f'<div class="detail-project-name">{html_escape(fp["name"])}</div>'
             f'<div class="detail-project-path">{html_escape(fp["short_path"])}</div>'
             '</div>'
-            f'<span class="detail-badge" {fp_badge_style}>'
-            f'{fp_label}</span>'
+            f'<span class="detail-badge" style="background:var(--{fp_sv}-bg);color:var(--{fp_sv});cursor:pointer" '
+            f'onclick="showProjectStatusDropdown(this,0,event)">'
+            f'{fp_label} <span class="dd">&#9660;</span></span>'
             '</div></div>'
         )
 
@@ -1183,6 +1179,7 @@ def generate_html(all_sessions, summaries, days):
   --text:         oklch(0.92 0.01 55);
   --text-2:       oklch(0.72 0.01 55);
   --text-3:       oklch(0.50 0.01 55);
+  --text-3-bg:    oklch(0.22 0.01 55);
   --text-4:       oklch(0.38 0.01 55);
   --progress:     oklch(0.72 0.14 250);
   --progress-bg:  oklch(0.22 0.04 250);
@@ -1216,6 +1213,7 @@ def generate_html(all_sessions, summaries, days):
   --text: oklch(0.15 0.02 55);
   --text-2: oklch(0.35 0.015 55);
   --text-3: oklch(0.55 0.01 55);
+  --text-3-bg: oklch(0.92 0.008 55);
   --text-4: oklch(0.68 0.008 55);
   --progress: oklch(0.50 0.18 250);
   --progress-bg: oklch(0.94 0.04 250);
@@ -1252,7 +1250,7 @@ body {{
 
 /* ── Sidebar ───────────────────────────────────────────── */
 .sidebar {{
-  width: 300px;
+  width: clamp(260px, 18vw, 340px);
   border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
@@ -1283,7 +1281,8 @@ body {{
   font-family: system-ui;
 }}
 .sidebar-toggle:hover {{ background: var(--surface-hover); color: var(--text-2); }}
-.sidebar.collapsed .sidebar-toggle {{ margin: 0 auto; }}
+.sidebar.collapsed .sidebar-header {{ justify-content: center; padding: 16px 0; min-height: auto; }}
+.sidebar.collapsed .sidebar-toggle {{ margin: 0; }}
 .sidebar.collapsed .sidebar-toggle .chevron {{ transform: rotate(180deg); }}
 .chevron {{ display: inline-block; transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1); }}
 
@@ -1298,19 +1297,15 @@ body {{
 .search-input::placeholder {{ color: var(--text-4); }}
 .search-input:focus {{ border-color: var(--text-3); }}
 
-/* Sidebar Filters */
-.sidebar-filters {{
-  padding: 10px 20px; display: flex; gap: 6px; flex-wrap: wrap;
-  border-bottom: 1px solid var(--border);
+/* Inactive toggle */
+.inactive-toggle {{
+  display: flex; align-items: center; gap: 6px; cursor: pointer;
+  font-size: 0.72rem; color: var(--text-4); user-select: none;
+  font-family: inherit;
 }}
-.sidebar.collapsed .sidebar-filters {{ display: none; }}
-.filter-chip {{
-  background: transparent; border: 1px solid var(--border); color: var(--text-3);
-  padding: 4px 11px; border-radius: 16px; font-size: 0.75rem; cursor: pointer;
-  font-family: inherit; font-weight: 500; transition: all 0.15s;
-}}
-.filter-chip:hover {{ background: var(--surface-hover); color: var(--text-2); border-color: var(--border-2); }}
-.filter-chip.active {{ background: var(--text); color: var(--bg); border-color: var(--text); }}
+.inactive-toggle:hover {{ color: var(--text-3); }}
+.inactive-cb {{ accent-color: var(--text-3); cursor: pointer; margin: 0; }}
+.sidebar.collapsed .inactive-toggle {{ font-size: 0; gap: 0; }}
 
 /* Project List */
 .project-list {{ flex: 1; overflow-y: auto; padding: 6px 0; }}
@@ -1337,6 +1332,12 @@ body {{
   text-transform: uppercase; letter-spacing: 0.04em; white-space: nowrap;
   display: flex; align-items: center; gap: 3px;
 }}
+.project-status-inactive {{
+  background: var(--surface-2); color: var(--text-3);
+  border: 1px solid var(--border);
+}}
+.project-status {{ cursor: pointer; }}
+.project-status .dd {{ font-size: 6px; opacity: 0.5; }}
 .project-last-session {{
   font-size: 0.78rem; color: var(--text-3); margin-top: 4px;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 1.4;
@@ -1360,28 +1361,21 @@ body {{
   border-radius: 50%; border: 2px solid var(--surface);
 }}
 
-/* Inactive Section */
-.inactive-section {{ border-top: 1px solid var(--border); }}
-.inactive-toggle {{
-  padding: 10px 20px; color: var(--text-4); font-size: 0.78rem; cursor: pointer;
-  display: flex; align-items: center; gap: 6px; transition: color 0.15s; user-select: none;
-}}
-.inactive-toggle:hover {{ color: var(--text-3); }}
-.sidebar.collapsed .inactive-toggle {{ padding: 6px 0; justify-content: center; }}
-.sidebar.collapsed .inactive-label {{ display: none; }}
-.inactive-arrow {{ font-size: 9px; transition: transform 0.2s; display: inline-block; }}
-.inactive-section.open .inactive-arrow {{ transform: rotate(90deg); }}
-.inactive-list {{ display: none; }}
-.inactive-section.open .inactive-list {{ display: block; }}
-.inactive-list .project-item {{ opacity: 0.4; }}
-.inactive-list .project-item:hover {{ opacity: 0.65; }}
+/* Inactive Projects */
+.project-item.inactive {{ opacity: 0.45; }}
+.project-item.inactive:hover {{ opacity: 0.7; }}
+.project-item.inactive.selected {{ opacity: 0.85; }}
+.project-item.inactive.sr-hidden {{ display: none; }}
 
 /* Sidebar Footer */
 .sidebar-footer {{
   padding: 12px 20px; border-top: 1px solid var(--border);
   display: flex; align-items: center; gap: 8px;
 }}
-.sidebar.collapsed .sidebar-footer {{ justify-content: center; padding: 12px 0; }}
+.sidebar.collapsed .sidebar-footer {{ justify-content: center; padding: 12px 0; flex-direction: column; align-items: center; gap: 8px; }}
+.sidebar.collapsed .inactive-toggle {{ font-size: 0; }}
+.sidebar.collapsed .inactive-toggle .inactive-cb {{ font-size: initial; }}
+.sidebar.collapsed .theme-text-btn {{ font-size: 0.6rem; }}
 .sidebar.collapsed .footer-label {{ display: none; }}
 .theme-btn {{
   background: var(--surface-2); border: 1px solid var(--border); border-radius: 6px;
@@ -1392,7 +1386,15 @@ body {{
 .footer-label {{ font-size: 0.72rem; color: var(--text-4); }}
 
 /* ── Detail Panel ──────────────────────────────────────── */
-.detail {{ flex: 1; overflow-y: auto; background: var(--bg); }}
+.detail {{ flex: 1; overflow-y: auto; background: var(--bg); position: relative; }}
+/* Theme text button */
+.theme-text-btn {{
+  background: none; border: none; color: var(--text-4); cursor: pointer;
+  font-size: 0.72rem; font-family: inherit; font-weight: 500; padding: 0;
+  text-decoration: underline; text-underline-offset: 2px;
+  transition: color 0.15s;
+}}
+.theme-text-btn:hover {{ color: var(--text-2); }}
 .detail-inner {{ max-width: 780px; padding: 40px 48px; }}
 .detail-header {{ margin-bottom: 32px; }}
 .detail-top-row {{
@@ -1422,10 +1424,20 @@ body {{
 
 /* ── Summary Sections ──────────────────────────────────── */
 .summary-sections {{
-  margin-bottom: 32px; display: flex; flex-direction: column; gap: 20px;
+  margin-bottom: 32px; display: flex; flex-direction: column; gap: 12px;
 }}
-.summary-block {{ display: flex; gap: 14px; }}
+.summary-block {{ display: flex; gap: 14px; cursor: pointer; }}
+.summary-block:hover {{ background: var(--surface-hover); margin: -8px -12px; padding: 8px 12px; border-radius: 6px; }}
 .summary-bar {{ width: 3px; border-radius: 2px; flex-shrink: 0; }}
+.summary-block-inner {{ flex: 1; min-width: 0; }}
+.summary-block-header {{ display: flex; align-items: center; gap: 6px; }}
+.summary-block-chevron {{ font-size: 0.7rem; color: var(--text-4); transition: transform 0.2s; }}
+.summary-block:not(.collapsed) .summary-block-chevron {{ transform: rotate(90deg); }}
+.summary-block-preview {{ font-size: 0.82rem; color: var(--text-3); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
+.summary-block:not(.collapsed) .summary-block-preview {{ display: none; }}
+.summary-block-full {{ display: grid; grid-template-rows: 1fr; transition: grid-template-rows 0.25s ease; }}
+.summary-block.collapsed .summary-block-full {{ grid-template-rows: 0fr; }}
+.summary-block-full > .summary-block-content {{ overflow: hidden; }}
 .summary-block-label {{ font-size: 0.78rem; font-weight: 600; margin-bottom: 6px; }}
 .summary-block-content {{
   font-size: var(--step-0); color: var(--text-2); line-height: 1.65;
@@ -1615,21 +1627,13 @@ body {{
       <input type="text" class="search-input" placeholder="Search projects... (/)" oninput="searchProjects(this.value)">
     </div>
 
-    <div class="sidebar-filters">
-      <button class="filter-chip active" onclick="filterProjects('all',this)">All {total_projects}</button>
-      {"<button class='filter-chip' onclick=\"filterProjects('active',this)\">Active " + str(n_active) + "</button>" if n_active else ""}
-      {"<button class='filter-chip' onclick=\"filterProjects('inactive',this)\">Inactive " + str(n_inactive_proj) + "</button>" if n_inactive_proj else ""}
-    </div>
-
     <div class="project-list" id="projectList">
-      {''.join(sidebar_active_items)}
+      {''.join(sidebar_items)}
     </div>
-
-    {inactive_section}
 
     <div class="sidebar-footer">
-      <button class="theme-btn" onclick="toggleTheme()" title="Toggle theme"><span class="theme-icon">&#9790;</span></button>
-      <span class="footer-label">Dark theme</span>
+      {f'<label class="inactive-toggle"><input type="checkbox" checked onchange="toggleInactiveVisibility(this)" class="inactive-cb">{n_inactive_proj} inactive</label>' if n_inactive_proj > 0 else ''}
+      <button class="theme-text-btn" onclick="toggleTheme()"><span class="theme-label">Dark</span></button>
     </div>
   </div>
 
@@ -1668,8 +1672,7 @@ function toggleTheme() {{
 function updateThemeUI() {{
   const isDark = document.documentElement.getAttribute('data-theme') !== 'light';
   document.querySelectorAll('.theme-icon').forEach(el => el.textContent = isDark ? '\\u2600' : '\\u263E');
-  const label = document.querySelector('.footer-label');
-  if (label) label.textContent = isDark ? 'Dark theme' : 'Light theme';
+  document.querySelectorAll('.theme-label').forEach(el => el.textContent = isDark ? 'Light' : 'Dark');
 }}
 
 /* ── Sidebar Toggle ────────────────────────── */
@@ -1698,13 +1701,14 @@ function renderProjectDetail(index) {{
   const badgeStyle = 'background:var(--' + sv + '-bg);color:var(--' + sv + ')';
   const first = proj.sessions && proj.sessions[0];
 
-  // Project-level badge: Active/Inactive — no dropdown (computed, not user-correctable)
+  // Project-level badge: Active/Inactive — with manual override dropdown
   let html = '<div class="detail-header"><div class="detail-top-row"><div>' +
     '<div class="detail-project-name">' + esc(proj.name) + '</div>' +
     '<div class="detail-project-path">' + esc(proj.short_path) + '</div>' +
     '</div>' +
-    '<span class="detail-badge" style="' + badgeStyle + '">' +
-    label + '</span>' +
+    '<span class="detail-badge" style="' + badgeStyle + ';cursor:pointer" ' +
+    'onclick="showProjectStatusDropdown(this,' + index + ',event)">' +
+    label + ' <span class="dd">&#9660;</span></span>' +
     '</div></div>';
 
   if (first) {{
@@ -1774,6 +1778,7 @@ function escAttr(s) {{ return esc(s).replace(/'/g, '&#39;'); }}
 
 /* ── Timeline Toggle ───────────────────────── */
 function toggleTimeline(el) {{ el.classList.toggle('expanded'); }}
+function toggleSummaryBlock(el) {{ el.classList.toggle('collapsed'); }}
 
 /* ── Status Dropdown ───────────────────────── */
 function showStatusDropdown(badgeEl, sessionId, event) {{
@@ -1847,26 +1852,89 @@ function applyStatusCorrection(sessionId, newStatus, badgeEl) {{
   }});
 }}
 
-/* ── Filter Projects (sidebar) ─────────────── */
-function filterProjects(status, btn) {{
-  document.querySelectorAll('.filter-chip').forEach(c => c.classList.remove('active'));
-  if (btn) btn.classList.add('active');
+/* ── Project Status Override ──────────────── */
+function showProjectStatusDropdown(badgeEl, projectIndex, event) {{
+  event.stopPropagation();
+  const existing = document.querySelector('.status-dropdown');
+  if (existing) {{ existing.remove(); return; }}
 
-  document.querySelectorAll('.project-item').forEach(function(item) {{
-    const pStatus = item.dataset.status;
-    const show = (status === 'all') || (pStatus === status);
-    item.style.display = show ? '' : 'none';
+  const rect = badgeEl.getBoundingClientRect();
+  const dd = document.createElement('div');
+  dd.className = 'status-dropdown';
+  dd.style.top = (rect.bottom + 4) + 'px';
+  dd.style.left = rect.left + 'px';
+
+  const proj = projectsData[projectIndex];
+  const currentStatus = proj ? proj.status : 'active';
+
+  ['active', 'inactive'].forEach(function(st) {{
+    const item = document.createElement('div');
+    item.className = 'status-dropdown-item';
+    const check = currentStatus === st ? '\\u2713' : '';
+    const colorVar = STATUS_COLORS[st] || (st === 'active' ? '--progress' : '--text-3');
+    item.innerHTML = '<span class="check">' + check + '</span>' +
+      '<span class="swatch" style="background:var(' + colorVar + ')"></span>' +
+      STATUS_LABELS[st];
+    item.onclick = function(e) {{
+      e.stopPropagation();
+      applyProjectStatusOverride(projectIndex, st, badgeEl);
+      dd.remove();
+    }};
+    dd.appendChild(item);
   }});
 
-  // Show/hide the inactive section based on filter
-  const inactiveSec = document.getElementById('inactiveSection');
-  if (inactiveSec) {{
-    if (status === 'active') {{
-      inactiveSec.style.display = 'none';
-    }} else {{
-      inactiveSec.style.display = '';
+  document.body.appendChild(dd);
+  setTimeout(function() {{
+    document.addEventListener('click', function handler() {{
+      dd.remove();
+      document.removeEventListener('click', handler);
+    }}, {{ once: true }});
+  }}, 0);
+}}
+
+function applyProjectStatusOverride(projectIndex, newStatus, badgeEl) {{
+  const proj = projectsData[projectIndex];
+  if (!proj) return;
+  proj.status = newStatus;
+
+  const sv = STATUS_VAR[newStatus] || 'text-3';
+  const label = STATUS_LABELS[newStatus] || newStatus;
+  badgeEl.style.cssText = 'background:var(--' + sv + '-bg);color:var(--' + sv + ');cursor:pointer';
+  badgeEl.innerHTML = label + ' <span class="dd">&#9660;</span>';
+
+  // Update sidebar item
+  const sidebarItem = document.querySelector('.project-item[data-project-index="' + projectIndex + '"]');
+  if (sidebarItem) {{
+    sidebarItem.dataset.status = newStatus;
+    sidebarItem.classList.toggle('inactive', newStatus === 'inactive');
+    const badge = sidebarItem.querySelector('.project-status');
+    if (badge) {{
+      if (newStatus === 'inactive') {{
+        badge.style.cssText = '';
+        badge.className = 'project-status project-status-inactive';
+      }} else {{
+        badge.style.cssText = 'background:var(--' + sv + '-bg);color:var(--' + sv + ')';
+        badge.className = 'project-status';
+      }}
+      badge.textContent = label;
     }}
   }}
+
+  // Store in localStorage
+  let overrides = {{}};
+  try {{ overrides = JSON.parse(localStorage.getItem('sr-project-overrides') || '{{}}'); }} catch(e) {{}}
+  overrides[proj.folder] = newStatus;
+  localStorage.setItem('sr-project-overrides', JSON.stringify(overrides));
+}}
+
+/* ── Toggle Inactive Visibility ───────────── */
+function toggleInactiveVisibility(cb) {{
+  const items = document.querySelectorAll('.project-item.inactive');
+  const show = cb ? cb.checked : !(items.length > 0 && items[0].classList.contains('sr-hidden'));
+  items.forEach(function(el) {{ el.classList.toggle('sr-hidden', !show); }});
+  const checkbox = document.querySelector('.inactive-cb');
+  if (checkbox) checkbox.checked = show;
+  localStorage.setItem('sr-hide-inactive', show ? '' : '1');
 }}
 
 /* ── Filter Sessions (detail timeline) ─────── */
@@ -1893,13 +1961,11 @@ function searchProjects(query) {{
     const text = item.textContent.toLowerCase();
     item.style.display = text.includes(q) ? '' : 'none';
   }});
+  // Hide divider when searching
+  const divider = document.getElementById('inactiveDivider');
+  if (divider) divider.style.display = q ? 'none' : '';
 }}
 
-/* ── Toggle Inactive Section ───────────────── */
-function toggleInactive() {{
-  const sec = document.getElementById('inactiveSection');
-  if (sec) sec.classList.toggle('open');
-}}
 
 /* ── Initialization ────────────────────────── */
 (function init() {{
@@ -1936,6 +2002,13 @@ function toggleInactive() {{
         if (corrections[s.session_id]) s.status = corrections[s.session_id];
       }});
     }});
+  }}
+
+  // Restore inactive visibility preference
+  if (localStorage.getItem('sr-hide-inactive') === '1') {{
+    document.querySelectorAll('.project-item.inactive').forEach(function(el) {{ el.classList.add('sr-hidden'); }});
+    const cb = document.querySelector('.inactive-cb');
+    if (cb) cb.checked = false;
   }}
 
   // Select first project
@@ -2084,7 +2157,7 @@ def main():
     parser.add_argument("--limit", type=int, default=0, help="Max sessions to scan (0 = unlimited)")
     parser.add_argument("--collect", action="store_true", help="Output JSON of sessions needing summaries")
     parser.add_argument("--collect-file", type=str, default=None, help="Path for collect output")
-    parser.add_argument("--max-collect", type=int, default=50, help="Max sessions to collect for summarization (default: 50)")
+    parser.add_argument("--max-collect", type=int, default=0, help="Max sessions to collect for summarization (0 = unlimited)")
     parser.add_argument("--update-cache", type=str, default=None, metavar="FILE", help="Merge summaries from a JSON file into the cache")
     parser.add_argument("--review-statuses", action="store_true", help="Output folder-grouped summaries for cross-session status review")
     parser.add_argument("--update-statuses", type=str, default=None, metavar="FILE", help="Apply status corrections from a JSON file")
