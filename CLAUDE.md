@@ -56,21 +56,25 @@ python claude-session-report.py 1 --no-open   # don't open browser
 
 ## Reading the Script
 
-`claude-session-report.py` is ~1500 lines — too large to read in one pass. Key sections:
-- Cache (~75–115), Helpers (~117–200), Session parsing (~203–410)
-- Transcript sampling (~410–440), Summaries/collect (~443–620)
-- Markdown/HTML rendering (~621–1300), Text output (~1307–1380), Main/CLI (~1383–1502)
+`claude-session-report.py` is ~2170 lines — too large to read in one pass. Key sections:
+- Cache (~75–170), Helpers (~173–270), Session parsing (~274–390)
+- Collect sessions (~389–480), Transcript sampling (~481–515), Summaries (~514–625)
+- Two-pass status review (~626–690), Markdown conversion (~692–878)
+- Project aggregation & HTML output (~879–1970), Text output (~1972–2050), Main/CLI (~2048–2171)
 
 ## Working with the HTML Template
 
 - The HTML template is embedded in `claude-session-report.py` as an f-string — all CSS `{` `}` must be doubled (`{{` `}}`)
-- Template sections: CSS (lines ~800–1070), HTML structure (~1073–1140), JS (~1145–1300)
-- `md_to_html()` (~625–655) converts summary markdown to HTML — heading levels here control the document's heading hierarchy
-- Output HTML is ~1860 lines and 31k+ tokens — too large to read in one pass; read in chunks
+- The template uses a **sidebar + detail panel (master-detail) layout**: the sidebar lists projects, and clicking a project renders its sessions in the detail panel
+- **JS renders project detail client-side** from embedded JSON — session data is serialized into a `<script type="application/json" id="projects-data">` block, and JS builds the detail view dynamically
+- **Status corrections** from a previous report are embedded in a `<script type="application/json" id="status-corrections">` block and carried forward automatically
+- Key server-side functions for the new layout:
+  - `aggregate_projects()` (~812) — groups sessions by project folder, computes project-level status/metadata, splits into active vs. inactive
+  - `parse_summary_sections()` (~749) — splits a summary into titled sections (What Was Done, Current Status, etc.) for structured rendering
+  - `read_corrections_from_previous_report()` (~117) — reads the most recent HTML report and extracts embedded status corrections JSON so they persist across regenerations
+- `md_to_html()` (~692) converts summary markdown to HTML — heading levels here control the document's heading hierarchy
 - To preview locally, use `start "" <path>` on Windows — the Chrome MCP prepends `https://` to `file:///` URLs
 - For Playwright MCP preview: `python -m http.server 8787 --directory ~/.claude/reports` then navigate to `localhost:8787/<filename>`
-- The JS has a `toggleCompleted()` function that interacts with `filterStatus()` — when filtering to "complete", `completed-hidden` is removed from folders; when switching back to "all", it's restored for folders with non-complete sessions
-- Nested clickable elements (e.g., click-to-copy buttons inside session rows) need `event.stopPropagation()` to prevent parent toggle
 
 ## UX/Design Review Documents
 
