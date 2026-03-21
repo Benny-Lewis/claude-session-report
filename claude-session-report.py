@@ -1632,7 +1632,7 @@ body {{
 
     <div class="sidebar-footer">
       {f'<label class="inactive-toggle"><input type="checkbox" checked onchange="toggleInactiveVisibility(this)" class="inactive-cb">{n_inactive_proj} inactive</label>' if n_inactive_proj > 0 else ''}
-      <button class="theme-text-btn" onclick="toggleTheme()" title="Toggle theme"><span class="theme-icon">🌙</span></button>
+      <button class="theme-text-btn" onclick="toggleTheme()" title="Toggle theme"><span class="theme-icon">&#9684;</span></button>
     </div>
   </div>
 
@@ -1670,7 +1670,7 @@ function toggleTheme() {{
 
 function updateThemeUI() {{
   const isDark = document.documentElement.getAttribute('data-theme') !== 'light';
-  document.querySelectorAll('.theme-icon').forEach(el => el.textContent = isDark ? '\\u2600\\uFE0F' : '\\uD83C\\uDF19');
+  document.querySelectorAll('.theme-icon').forEach(el => el.textContent = isDark ? '\\u263C' : '\\u25D1');
 }}
 
 /* ── Sidebar Toggle ────────────────────────── */
