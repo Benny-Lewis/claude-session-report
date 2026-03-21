@@ -162,6 +162,21 @@ def format_timestamp_short(ts):
         return local.strftime("%b %d")
 
 
+def format_duration(start, end):
+    """Format duration between two datetimes as human-readable string."""
+    if not start or not end:
+        return ""
+    delta = end - start
+    total_minutes = int(delta.total_seconds() / 60)
+    if total_minutes < 60:
+        return f"{total_minutes}m"
+    hours = total_minutes // 60
+    minutes = total_minutes % 60
+    if minutes == 0:
+        return f"{hours}h"
+    return f"{hours}h {minutes}m"
+
+
 def short_path(folder):
     if folder.startswith(HOME_STR):
         return "~" + folder[len(HOME_STR):]
@@ -654,6 +669,85 @@ def md_to_html(text):
     if in_list:
         html_lines.append("</ul>")
     return "\n".join(html_lines)
+
+
+def aggregate_projects(all_sessions, summaries, days):
+    """Group sessions by project with computed metadata for the sidebar."""
+    by_project = defaultdict(list)
+    now = datetime.now()
+    inactive_threshold = now - timedelta(hours=24)
+
+    for s in all_sessions:
+        sid = s["session_id"]
+        s_data = summaries.get(sid, {})
+        if isinstance(s_data, dict):
+            s["_summary"] = s_data.get("summary", "")
+            s["_status"] = s_data.get("status", "unknown")
+            s["_title"] = s_data.get("title") or extract_title_from_summary(s_data.get("summary", ""))
+        else:
+            s["_summary"] = ""
+            s["_status"] = "unknown"
+            s["_title"] = None
+        if not s["_title"]:
+            s["_title"] = truncate(s["first_ask"], 80)
+        by_project[s["cwd"] or s["project_path"]].append(s)
+
+    projects = []
+    for folder, sessions in by_project.items():
+        sessions.sort(key=lambda x: x["latest"], reverse=True)
+        latest_session = sessions[0]
+        status_counts = defaultdict(int)
+        for s in sessions:
+            status_counts[s["_status"]] += 1
+
+        # Project-level status: heuristic for v1 — priority: blocked > in_progress > handed_off > latest session
+        # NOTE: Spec calls for AI-synthesized project status via --review-statuses pipeline.
+        # This mechanical heuristic is a v1 simplification. A follow-up should update
+        # session-report.md prompt to produce a project_status field during the review pass.
+        project_status = latest_session["_status"]
+        for s in sessions:
+            if s["_status"] == "blocked":
+                project_status = "blocked"
+                break
+            if s["_status"] == "in_progress":
+                project_status = "in_progress"
+                break
+            if s["_status"] == "handed_off" and project_status not in ("in_progress", "blocked"):
+                project_status = "handed_off"
+
+        # Active/inactive: inactive if all sessions complete and latest > 24h ago
+        all_complete = all(s["_status"] in ("complete", "unknown") for s in sessions)
+        latest_time = max(s["latest"] for s in sessions)
+        is_inactive = all_complete and latest_time < inactive_threshold
+
+        # Short name: last component of the path
+        short_name = short_path(folder).rstrip("/\\").split("/")[-1].split("\\")[-1]
+        # Initials: first two chars of first two words, or first two chars
+        parts = re.split(r'[-_]', short_name)
+        if len(parts) >= 2:
+            initials = (parts[0][0] + parts[1][0]).upper()
+        else:
+            initials = short_name[:2].upper()
+
+        projects.append({
+            "folder": folder,
+            "short_path": short_path(folder),
+            "name": short_name,
+            "initials": initials,
+            "sessions": sessions,
+            "session_count": len(sessions),
+            "latest": latest_time,
+            "status": project_status,
+            "status_counts": dict(status_counts),
+            "is_inactive": is_inactive,
+            "last_title": latest_session["_title"],
+        })
+
+    # Sort: active first (by recency), then inactive (by recency)
+    active = sorted([p for p in projects if not p["is_inactive"]], key=lambda p: p["latest"], reverse=True)
+    inactive = sorted([p for p in projects if p["is_inactive"]], key=lambda p: p["latest"], reverse=True)
+
+    return active, inactive
 
 
 # ─── HTML output ──────────────────────────────────────────────────────────────
