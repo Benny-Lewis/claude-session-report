@@ -812,7 +812,7 @@ def parse_summary_sections(summary_text):
 def aggregate_projects(all_sessions, summaries, days):
     """Group sessions by project with computed metadata for the sidebar."""
     by_project = defaultdict(list)
-    now = datetime.now()
+    now = datetime.now(timezone.utc)
     inactive_threshold = now - timedelta(hours=24)
 
     for s in all_sessions:
@@ -892,141 +892,292 @@ def aggregate_projects(all_sessions, summaries, days):
 
 
 def generate_html(all_sessions, summaries, days):
-    by_project = defaultdict(list)
-    status_counts = defaultdict(int)
-
-    for s in all_sessions:
-        sid = s["session_id"]
-        s_data = summaries.get(sid, {})
-        if isinstance(s_data, dict):
-            s["_summary"] = s_data.get("summary", "")
-            s["_status"] = s_data.get("status", "unknown")
-            s["_title"] = s_data.get("title") or extract_title_from_summary(s_data.get("summary", ""))
-        else:
-            s["_summary"] = ""
-            s["_status"] = "unknown"
-            s["_title"] = None
-
-        if not s["_title"]:
-            s["_title"] = truncate(s["first_ask"], 80)
-
-        status_counts[s["_status"]] += 1
-        by_project[s["cwd"] or s["project_path"]].append(s)
-
-    total_msgs = sum(s["total_messages"] for s in all_sessions)
+    # ── Aggregate projects ──────────────────────────────────
+    active_projects, inactive_projects = aggregate_projects(all_sessions, summaries, days)
+    all_projects = active_projects + inactive_projects
+    total_projects = len(all_projects)
     now_str = datetime.now().strftime("%b %d, %Y %I:%M %p")
-    n_progress = status_counts.get("in_progress", 0)
-    n_blocked = status_counts.get("blocked", 0)
-    n_handed = status_counts.get("handed_off", 0)
-    n_complete = status_counts.get("complete", 0)
-    n_unknown = status_counts.get("unknown", 0)
 
-    sorted_folders = sorted(
-        by_project.items(), key=lambda x: max(s["latest"] for s in x[1]), reverse=True
-    )
+    # Status variable mapping
+    STATUS_VAR = {
+        "in_progress": "progress",
+        "blocked": "blocked",
+        "handed_off": "handed",
+        "complete": "complete",
+        "unknown": "text-3",
+    }
 
-    # Build folder HTML
-    folder_parts = []
-    for folder, sessions in sorted_folders:
-        sf = short_path(folder)
-        latest_ts = format_timestamp_short(max(s["latest"] for s in sessions))
-        total_folder_msgs = sum(s["total_messages"] for s in sessions)
+    def _time_ago(ts):
+        """Format timestamp as relative time ago string."""
+        if not ts:
+            return ""
+        now = datetime.now(timezone.utc)
+        delta = now - ts
+        minutes = int(delta.total_seconds() / 60)
+        if minutes < 60:
+            return f"{minutes}m ago"
+        hours = minutes // 60
+        if hours < 24:
+            return f"{hours}h ago"
+        d = hours // 24
+        return f"{d}d ago"
 
-        # Folder status counts
-        f_counts = defaultdict(int)
-        for s in sessions:
-            f_counts[s["_status"]] += 1
+    # ── Pre-render all project data for JSON embedding ──────
+    projects_json = []
+    for proj in all_projects:
+        sessions_data = []
+        for s in proj["sessions"]:
+            summary_text = s.get("_summary", "")
+            sections, next_steps = parse_summary_sections(summary_text)
 
-        folder_status_pills = ""
-        if f_counts.get("in_progress", 0):
-            n = f_counts["in_progress"]
-            folder_status_pills += f'<span class="fpill progress" title="{n} in progress">{n}</span>'
-        if f_counts.get("blocked", 0):
-            n = f_counts["blocked"]
-            folder_status_pills += f'<span class="fpill blocked" title="{n} blocked">{n}</span>'
-        if f_counts.get("handed_off", 0):
-            n = f_counts["handed_off"]
-            folder_status_pills += f'<span class="fpill handed" title="{n} handed off">{n}</span>'
+            # Pre-render summary HTML
+            sections_html = ""
+            for sec in sections:
+                sections_html += (
+                    '<div class="summary-block">'
+                    f'<div class="summary-bar" style="background:var(--section-{html_escape(sec["css_class"])})"></div>'
+                    '<div>'
+                    f'<div class="summary-block-label" style="color:var(--section-{html_escape(sec["css_class"])})">{html_escape(sec["label"])}</div>'
+                    f'<div class="summary-block-content">{sec["html"]}</div>'
+                    '</div></div>'
+                )
+            next_steps_html = next_steps["html"] if next_steps else ""
 
-        # Status breakdown for folder info
-        status_parts = []
-        if f_counts.get("in_progress", 0):
-            status_parts.append(f'{f_counts["in_progress"]} active')
-        if f_counts.get("blocked", 0):
-            status_parts.append(f'{f_counts["blocked"]} blocked')
-        if f_counts.get("handed_off", 0):
-            status_parts.append(f'{f_counts["handed_off"]} handed off')
-        if f_counts.get("complete", 0):
-            status_parts.append(f'{f_counts["complete"]} complete')
-        if f_counts.get("unknown", 0):
-            status_parts.append(f'{f_counts["unknown"]} unsummarized')
-        status_breakdown = " \u00b7 ".join(status_parts) if status_parts else f'{len(sessions)} session{"s" if len(sessions) != 1 else ""}'
-
-        # Build session rows
-        session_parts = []
-        for s in sessions:
-            sid = s["session_id"]
-            status = s["_status"]
-            title = html_escape(s["_title"])
-            summary = s["_summary"]
-            time_short = format_timestamp_short(s["latest"])
-            msgs = s["total_messages"]
-
-            # Detail content
-            if summary and not summary.startswith("("):
-                detail_body = md_to_html(summary)
-            else:
-                parts = [f'<p class="raw-ask"><strong>Opening ask:</strong> {html_escape(truncate(s["first_ask"], 300))}</p>']
-                if s["last_assistant"]:
+            # Fallback summary for unsummarized sessions
+            if not sections_html and summary_text and not summary_text.startswith("("):
+                sections_html = (
+                    '<div class="summary-block">'
+                    '<div class="summary-bar" style="background:var(--section-done)"></div>'
+                    '<div>'
+                    '<div class="summary-block-label" style="color:var(--section-done)">Summary</div>'
+                    f'<div class="summary-block-content">{md_to_html(summary_text)}</div>'
+                    '</div></div>'
+                )
+            elif not sections_html:
+                # Raw fallback for unsummarized sessions
+                fallback_parts = [f'<p><strong>Opening ask:</strong> {html_escape(truncate(s["first_ask"], 300))}</p>']
+                if s.get("last_assistant"):
                     clean = clean_transcript_text(s["last_assistant"])
                     if clean and len(clean) > 10:
-                        parts.append(f'<p class="raw-resp"><strong>Last response:</strong> {html_escape(truncate(clean, 300))}</p>')
-                detail_body = "\n".join(parts)
+                        fallback_parts.append(f'<p><strong>Last response:</strong> {html_escape(truncate(clean, 300))}</p>')
+                sections_html = (
+                    '<div class="summary-block">'
+                    '<div class="summary-bar" style="background:var(--section-done)"></div>'
+                    '<div>'
+                    '<div class="summary-block-label" style="color:var(--section-done)">Session</div>'
+                    f'<div class="summary-block-content">{"".join(fallback_parts)}</div>'
+                    '</div></div>'
+                )
 
-            session_parts.append(f"""<div class="session" data-status="{status}">
-  <div class="session-row" onclick="toggleSession(this)" onkeydown="handleKey(event,this,toggleSession)" role="button" tabindex="0" aria-expanded="false">
-    <span class="badge {status}" title="{STATUS_TOOLTIPS.get(status, '')}">{STATUS_LABELS.get(status, status)}</span>
-    <span class="session-title">{title}</span>
-    <span class="session-time">{time_short}</span>
-    <span class="session-msgs">{msgs} msgs</span>
-    <span class="session-chevron"></span>
-  </div>
-  <div class="session-detail">
-    <div class="session-detail-inner">
-      <div class="detail-meta">
-        <span class="meta-time">{format_timestamp(s["earliest"])} &rarr; {format_timestamp(s["latest"])}</span>
-        <span class="meta-sep"></span>
-        <span class="meta-msgs">{s["user_msg_count"]} user / {s["assistant_msg_count"]} assistant</span>
-        <span class="meta-sep"></span>
-        <button class="meta-id" onclick="event.stopPropagation();navigator.clipboard.writeText('{sid}');this.textContent='Copied!';setTimeout(()=>this.textContent='{sid[:8]}…',1200)" title="Click to copy full ID: {sid}">{sid[:8]}&hellip;</button>
-      </div>
-      <div class="detail-body">{detail_body}</div>
-    </div>
-  </div>
-</div>""")
+            sessions_data.append({
+                "session_id": s["session_id"],
+                "title": s["_title"] or "",
+                "status": s["_status"],
+                "summary_html": sections_html,
+                "next_steps_html": next_steps_html,
+                "time_str": format_timestamp_short(s["latest"]),
+                "time_long": format_timestamp(s["latest"]),
+                "msgs": s["total_messages"],
+                "duration": format_duration(s["earliest"], s["latest"]),
+            })
 
-        n_complete_folder = f_counts.get("complete", 0)
-        completed_toggle = ""
-        has_non_complete = len(sessions) - n_complete_folder > 0
-        if n_complete_folder > 0:
-            label = f'{n_complete_folder} completed session{"s" if n_complete_folder != 1 else ""}'
-            completed_toggle = f'<button class="show-completed-toggle" onclick="toggleCompleted(this)">{label}</button>'
+        projects_json.append({
+            "folder": proj["folder"],
+            "name": proj["name"],
+            "short_path": proj["short_path"],
+            "initials": proj["initials"],
+            "status": proj["status"],
+            "session_count": proj["session_count"],
+            "latest_str": _time_ago(proj["latest"]),
+            "last_title": proj["last_title"] or "",
+            "is_inactive": proj["is_inactive"],
+            "status_counts": proj.get("status_counts", {}),
+            "sessions": sessions_data,
+        })
 
-        folder_parts.append(f"""<section class="folder{' completed-hidden' if n_complete_folder > 0 and has_non_complete else ''}" data-folder="{html_escape(sf)}" data-complete-count="{n_complete_folder}">
-  <div class="folder-header" onclick="toggleFolder(this)" onkeydown="handleKey(event,this,toggleFolder)" role="button" tabindex="0" aria-expanded="false">
-    <span class="folder-arrow"></span>
-    <span class="folder-path">{html_escape(sf)}</span>
-    <div class="folder-meta">
-      {folder_status_pills}
-      <span class="folder-info">{status_breakdown} &middot; {latest_ts}</span>
-    </div>
-  </div>
-  <div class="folder-body">
-    {''.join(session_parts)}
-    {completed_toggle}
-  </div>
-</section>""")
+    # Escape for safe embedding in <script>
+    projects_json_str = json.dumps(projects_json, ensure_ascii=False)
+    projects_json_str = projects_json_str.replace("</script>", "<\\/script>")
 
+    # ── Count statuses for sidebar filter chips ─────────────
+    n_active = sum(1 for p in all_projects if p["status"] in ("in_progress", "blocked"))
+    n_handed = sum(1 for p in all_projects if p["status"] == "handed_off")
+    n_blocked = sum(1 for p in all_projects if p["status"] == "blocked")
+
+    # ── Build sidebar project items ─────────────────────────
+    sidebar_active_items = []
+    for i, proj in enumerate(active_projects):
+        status = proj["status"]
+        sv = STATUS_VAR.get(status, "text-3")
+        label = STATUS_LABELS.get(status, status)
+        name_esc = html_escape(proj["name"])
+        title_esc = html_escape(proj["last_title"] or "")
+        time_ago = _time_ago(proj["latest"])
+        n_sess = proj["session_count"]
+        selected = " selected" if i == 0 else ""
+
+        # Status badge styling
+        if status == "unknown":
+            badge_style = 'style="color:var(--text-3);background:transparent;border:1px dashed var(--border)"'
+        else:
+            badge_style = f'style="background:var(--{sv}-bg);color:var(--{sv})"'
+
+        sidebar_active_items.append(
+            f'<div class="project-item{selected}" data-project-index="{i}" '
+            f'data-status="{status}" onclick="selectProject({i})">'
+            f'<div class="project-avatar">{html_escape(proj["initials"])}'
+            f'<div class="avatar-dot" style="background:var(--{sv})"></div></div>'
+            f'<div class="project-name-row">'
+            f'<span class="project-name">{name_esc}</span>'
+            f'<span class="project-status" {badge_style} '
+            f'onclick="showStatusDropdown(this,\'{html_escape(proj["folder"])}\',event)">'
+            f'{label} <span class="dd">&#9660;</span></span>'
+            f'</div>'
+            f'<div class="project-last-session">{title_esc}</div>'
+            f'<div class="project-time">{html_escape(time_ago)} &middot; {n_sess} session{"s" if n_sess != 1 else ""}</div>'
+            f'</div>'
+        )
+
+    # Inactive items
+    sidebar_inactive_items = []
+    for j, proj in enumerate(inactive_projects):
+        i = len(active_projects) + j
+        status = proj["status"]
+        sv = STATUS_VAR.get(status, "text-3")
+        name_esc = html_escape(proj["name"])
+        title_esc = html_escape(proj["last_title"] or "")
+        time_ago = _time_ago(proj["latest"])
+
+        sidebar_inactive_items.append(
+            f'<div class="project-item" data-project-index="{i}" '
+            f'data-status="{status}" onclick="selectProject({i})">'
+            f'<div class="project-avatar" style="opacity:0.5">{html_escape(proj["initials"])}'
+            f'<div class="avatar-dot" style="background:var(--{sv})"></div></div>'
+            f'<div class="project-name-row">'
+            f'<span class="project-name">{name_esc}</span>'
+            f'<span class="project-time" style="margin:0;font-size:0.7rem">{html_escape(time_ago)}</span>'
+            f'</div>'
+            f'<div class="project-last-session">{title_esc}</div>'
+            f'</div>'
+        )
+
+    n_inactive = len(inactive_projects)
+    inactive_section = ""
+    if n_inactive > 0:
+        inactive_section = (
+            '<div class="inactive-section" id="inactiveSection">'
+            '<div class="inactive-toggle" onclick="toggleInactive()">'
+            '<span class="inactive-arrow">&#9654;</span>'
+            f'<span class="inactive-label">{n_inactive} inactive project{"s" if n_inactive != 1 else ""}</span>'
+            f'<div class="project-avatar" style="display:grid;width:28px;height:28px;font-size:0.65rem;background:var(--surface-2)">+{n_inactive}</div>'
+            '</div>'
+            f'<div class="inactive-list">{"".join(sidebar_inactive_items)}</div>'
+            '</div>'
+        )
+
+    # ── Build first project detail panel (server-side default) ──
+    first_detail = ""
+    if all_projects:
+        fp = all_projects[0]
+        fp_status = fp["status"]
+        fp_sv = STATUS_VAR.get(fp_status, "text-3")
+        fp_label = STATUS_LABELS.get(fp_status, fp_status)
+        if fp_status == "unknown":
+            fp_badge_style = 'style="color:var(--text-3);background:transparent;border:1px dashed var(--border)"'
+        else:
+            fp_badge_style = f'style="background:var(--{fp_sv}-bg);color:var(--{fp_sv})"'
+
+        # First session data for the summary
+        fp_sessions = projects_json[0]["sessions"] if projects_json else []
+        fp_first = fp_sessions[0] if fp_sessions else None
+
+        first_detail_parts = []
+        # Header
+        first_detail_parts.append(
+            '<div class="detail-header"><div class="detail-top-row"><div>'
+            f'<div class="detail-project-name">{html_escape(fp["name"])}</div>'
+            f'<div class="detail-project-path">{html_escape(fp["short_path"])}</div>'
+            '</div>'
+            f'<span class="detail-badge" {fp_badge_style} '
+            f'onclick="showStatusDropdown(this,\'{html_escape(fp["folder"])}\',event)">'
+            f'{fp_label} <span class="dd">&#9660;</span></span>'
+            '</div></div>'
+        )
+
+        if fp_first:
+            # Summary sections
+            first_detail_parts.append(
+                f'<div class="summary-sections">{fp_first["summary_html"]}</div>'
+            )
+            # Session meta
+            first_detail_parts.append(
+                '<div class="session-meta-row">'
+                f'<span>{html_escape(fp_first["time_long"])}</span>'
+                '<span class="meta-dot"></span>'
+                f'<span>{fp_first["msgs"]} messages</span>'
+                '<span class="meta-dot"></span>'
+                f'<span>{html_escape(fp_first["duration"])}</span>'
+                '</div>'
+            )
+            # Next steps
+            if fp_first["next_steps_html"]:
+                first_detail_parts.append(
+                    '<div class="next-steps">'
+                    '<div class="next-steps-label">Next Steps</div>'
+                    f'{fp_first["next_steps_html"]}'
+                    '</div>'
+                )
+
+        # Recent sessions timeline
+        n_all_sess = len(fp_sessions)
+        n_progress_sess = sum(1 for s in fp_sessions if s["status"] == "in_progress")
+        n_complete_sess = sum(1 for s in fp_sessions if s["status"] == "complete")
+
+        timeline_items = []
+        for si, sess in enumerate(fp_sessions):
+            s_sv = STATUS_VAR.get(sess["status"], "text-3")
+            s_label = STATUS_LABELS.get(sess["status"], sess["status"])
+            if sess["status"] == "unknown":
+                s_badge_style = 'style="color:var(--text-3);background:transparent;border:1px dashed var(--border)"'
+            else:
+                s_badge_style = f'style="background:var(--{s_sv}-bg);color:var(--{s_sv})"'
+
+            timeline_items.append(
+                f'<div class="timeline-item" data-status="{sess["status"]}" onclick="toggleTimeline(this)">'
+                '<div class="timeline-top">'
+                f'<span class="timeline-title">{html_escape(sess["title"])}</span>'
+                f'<span class="timeline-badge" {s_badge_style} '
+                f'onclick="showStatusDropdown(this,\'{html_escape(sess["session_id"])}\',event)">'
+                f'{s_label} <span class="dd">&#9660;</span></span>'
+                '</div>'
+                '<div class="timeline-meta">'
+                f'<span>{html_escape(sess["time_str"])}</span>'
+                '<span class="meta-dot"></span>'
+                f'<span>{sess["msgs"]} msgs</span>'
+                '<span class="meta-dot"></span>'
+                f'<span>{html_escape(sess["duration"])}</span>'
+                '</div>'
+                '<div class="timeline-expansion"><div class="timeline-expansion-inner">'
+                f'<div class="timeline-expansion-text">{sess["summary_html"]}</div>'
+                '</div></div>'
+                '</div>'
+            )
+
+        first_detail_parts.append(
+            '<div class="recent-sessions">'
+            '<div class="recent-header">'
+            '<div class="section-label" style="margin-bottom:0">Recent Sessions</div>'
+            '<div class="detail-filters">'
+            f'<button class="detail-filter active" onclick="filterSessions(\'all\',this)">All {n_all_sess}</button>'
+            + (f'<button class="detail-filter" onclick="filterSessions(\'in_progress\',this)">In Progress {n_progress_sess}</button>' if n_progress_sess else "")
+            + (f'<button class="detail-filter" onclick="filterSessions(\'complete\',this)">Complete {n_complete_sess}</button>' if n_complete_sess else "")
+            + '</div></div>'
+            f'<div class="session-timeline">{"".join(timeline_items)}</div>'
+            '</div>'
+        )
+        first_detail = "".join(first_detail_parts)
+
+    # ── Assemble HTML ───────────────────────────────────────
     html = f"""<!DOCTYPE html>
 <html lang="en" data-theme="dark">
 <head>
@@ -1035,481 +1186,785 @@ def generate_html(all_sessions, summaries, days):
 <title>Session Report &mdash; Last {days} day(s)</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&display=swap" rel="stylesheet">
 <style>
 /* ── Reset ─────────────────────────────────────────────── */
-*,*::before,*::after {{ box-sizing:border-box; margin:0; padding:0; }}
+*, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
+
+/* ── Theme: Dark (default) ─────────────────────────────── */
+:root {{
+  --bg:           oklch(0.12 0.008 55);
+  --surface:      oklch(0.155 0.01 55);
+  --surface-2:    oklch(0.185 0.012 55);
+  --surface-hover: oklch(0.21 0.014 55);
+  --border:       oklch(0.24 0.012 55);
+  --border-2:     oklch(0.30 0.012 55);
+  --text:         oklch(0.92 0.01 55);
+  --text-2:       oklch(0.72 0.01 55);
+  --text-3:       oklch(0.50 0.01 55);
+  --text-4:       oklch(0.38 0.01 55);
+  --progress:     oklch(0.72 0.14 250);
+  --progress-bg:  oklch(0.22 0.04 250);
+  --blocked:      oklch(0.75 0.12 70);
+  --blocked-bg:   oklch(0.22 0.04 70);
+  --handed:       oklch(0.72 0.14 300);
+  --handed-bg:    oklch(0.22 0.04 300);
+  --complete:     oklch(0.68 0.10 160);
+  --complete-bg:  oklch(0.20 0.03 160);
+  --section-done:      oklch(0.55 0.03 55);
+  --section-decisions: oklch(0.50 0.025 200);
+  --section-issues:    oklch(0.52 0.035 25);
+  --shadow-sm: 0 1px 2px oklch(0 0 0 / 0.15);
+  --shadow-md: 0 4px 12px oklch(0 0 0 / 0.2);
+  --radius: 8px;
+  --step-0: clamp(0.8rem, 0.77rem + 0.15vw, 0.875rem);
+  --step-1: clamp(0.875rem, 0.84rem + 0.18vw, 1rem);
+  --step-2: clamp(1rem, 0.95rem + 0.25vw, 1.15rem);
+  --step-3: clamp(1.25rem, 1.15rem + 0.5vw, 1.5rem);
+  color-scheme: dark;
+}}
 
 /* ── Theme: Light ──────────────────────────────────────── */
-:root, [data-theme="light"] {{
-  --bg: oklch(0.97 0.005 70);
-  --surface: oklch(1 0 0);
-  --surface-hover: oklch(0.96 0.005 70);
-  --border: oklch(0.91 0.008 70);
-  --text: oklch(0.18 0.02 50);
-  --text-2: oklch(0.45 0.015 50);
-  --text-3: oklch(0.65 0.01 50);
-  --progress: oklch(0.50 0.18 255);
-  --progress-bg: oklch(0.94 0.04 255);
-  --blocked: oklch(0.55 0.16 65);
-  --blocked-bg: oklch(0.94 0.04 65);
+[data-theme="light"] {{
+  --bg: oklch(0.97 0.005 55);
+  --surface: oklch(0.94 0.007 55);
+  --surface-2: oklch(0.91 0.008 55);
+  --surface-hover: oklch(0.88 0.01 55);
+  --border: oklch(0.85 0.008 55);
+  --border-2: oklch(0.78 0.01 55);
+  --text: oklch(0.15 0.02 55);
+  --text-2: oklch(0.35 0.015 55);
+  --text-3: oklch(0.55 0.01 55);
+  --text-4: oklch(0.68 0.008 55);
+  --progress: oklch(0.50 0.18 250);
+  --progress-bg: oklch(0.94 0.04 250);
+  --blocked: oklch(0.55 0.16 70);
+  --blocked-bg: oklch(0.94 0.04 70);
   --handed: oklch(0.50 0.17 300);
   --handed-bg: oklch(0.94 0.04 300);
-  --complete: oklch(0.50 0.14 160);
+  --complete: oklch(0.48 0.12 160);
   --complete-bg: oklch(0.94 0.04 160);
-  --unknown: oklch(0.70 0.01 50);
-  --unknown-bg: transparent;
-  --code-bg: oklch(0.95 0.005 70);
-  --code-text: oklch(0.45 0.12 40);
-  --shadow: 0 1px 3px oklch(0.2 0 0 / 0.06);
+  --section-done: oklch(0.45 0.03 55);
+  --section-decisions: oklch(0.42 0.025 200);
+  --section-issues: oklch(0.44 0.035 25);
   color-scheme: light;
 }}
 
-/* ── Theme: Dark ───────────────────────────────────────── */
-[data-theme="dark"] {{
-  --bg: oklch(0.14 0.01 55);
-  --surface: oklch(0.18 0.012 55);
-  --surface-hover: oklch(0.22 0.012 55);
-  --border: oklch(0.27 0.012 55);
-  --text: oklch(0.90 0.01 55);
-  --text-2: oklch(0.65 0.01 55);
-  --text-3: oklch(0.50 0.01 55);
-  --progress: oklch(0.70 0.15 250);
-  --progress-bg: oklch(0.25 0.06 250);
-  --blocked: oklch(0.75 0.14 70);
-  --blocked-bg: oklch(0.25 0.05 70);
-  --handed: oklch(0.72 0.14 300);
-  --handed-bg: oklch(0.25 0.05 300);
-  --complete: oklch(0.68 0.12 160);
-  --complete-bg: oklch(0.22 0.04 160);
-  --unknown: oklch(0.45 0.01 55);
-  --unknown-bg: transparent;
-  --code-bg: oklch(0.20 0.01 55);
-  --code-text: oklch(0.72 0.1 40);
-  --shadow: 0 1px 3px oklch(0 0 0 / 0.2);
-  color-scheme: dark;
+/* ── Accessibility ─────────────────────────────────────── */
+@media (prefers-reduced-motion: reduce) {{
+  *, *::before, *::after {{ animation: none !important; transition-duration: 0.01ms !important; }}
 }}
 
 /* ── Base ──────────────────────────────────────────────── */
 body {{
-  background: var(--bg); color: var(--text);
+  background: var(--bg);
+  color: var(--text);
   font-family: 'Outfit', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
-  line-height: 1.5; padding: 0; margin: 0;
+  line-height: 1.55;
   -webkit-font-smoothing: antialiased;
-}}
-.wrap {{ max-width: 1100px; margin: 0 auto; padding: 32px 24px; }}
-@media (prefers-reduced-motion: reduce) {{
-  *, *::before, *::after {{ transition-duration: 0.01ms !important; }}
+  height: 100vh;
+  overflow: hidden;
 }}
 
-/* ── Header ────────────────────────────────────────────── */
-.header {{ display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 28px; }}
-.header h1 {{ font-size: 1.5rem; font-weight: 700; letter-spacing: -0.02em; }}
-.header .sub {{ color: var(--text-3); font-size: 0.8rem; margin-top: 2px; }}
-.theme-toggle {{
-  background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
-  width: 36px; height: 36px; cursor: pointer; display: grid; place-items: center;
-  font-size: 16px; transition: background 0.15s;
-}}
-.theme-toggle:hover {{ background: var(--surface-hover); }}
-.theme-toggle:focus-visible {{ outline: 2px solid var(--progress); outline-offset: 2px; }}
+/* ── Layout ────────────────────────────────────────────── */
+.layout {{ display: flex; height: 100vh; }}
 
-/* ── Status Strip ──────────────────────────────────────── */
-.status-strip {{
-  display: flex; align-items: center; gap: 24px; flex-wrap: wrap;
-  padding: 14px 0; margin-bottom: 20px;
+/* ── Sidebar ───────────────────────────────────────────── */
+.sidebar {{
+  width: 300px;
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  background: var(--surface);
+  transition: width 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+  overflow: hidden;
+}}
+.sidebar.collapsed {{ width: 56px; }}
+
+/* Sidebar Header */
+.sidebar-header {{
+  padding: 22px 20px 16px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  min-height: 68px;
+}}
+.sidebar-brand {{ overflow: hidden; white-space: nowrap; transition: opacity 0.2s; }}
+.sidebar.collapsed .sidebar-brand {{ opacity: 0; width: 0; }}
+.sidebar-title {{ font-size: var(--step-2); font-weight: 700; letter-spacing: -0.025em; }}
+.sidebar-sub {{ color: var(--text-3); font-size: var(--step-0); margin-top: 2px; }}
+.sidebar-toggle {{
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: 6px;
+  width: 30px; height: 30px; cursor: pointer; display: grid; place-items: center;
+  font-size: 15px; color: var(--text-3); flex-shrink: 0; transition: all 0.15s;
+  font-family: system-ui;
+}}
+.sidebar-toggle:hover {{ background: var(--surface-hover); color: var(--text-2); }}
+.sidebar.collapsed .sidebar-toggle {{ margin: 0 auto; }}
+.sidebar.collapsed .sidebar-toggle .chevron {{ transform: rotate(180deg); }}
+.chevron {{ display: inline-block; transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1); }}
+
+/* Sidebar Search */
+.sidebar-search {{ padding: 10px 20px; border-bottom: 1px solid var(--border); }}
+.sidebar.collapsed .sidebar-search {{ display: none; }}
+.search-input {{
+  width: 100%; background: var(--bg); border: 1px solid var(--border); color: var(--text);
+  padding: 8px 12px; border-radius: var(--radius); font-size: var(--step-0);
+  font-family: inherit; outline: none; transition: border-color 0.15s;
+}}
+.search-input::placeholder {{ color: var(--text-4); }}
+.search-input:focus {{ border-color: var(--text-3); }}
+
+/* Sidebar Filters */
+.sidebar-filters {{
+  padding: 10px 20px; display: flex; gap: 6px; flex-wrap: wrap;
   border-bottom: 1px solid var(--border);
 }}
-.status-group {{ display: flex; align-items: center; gap: 6px; font-size: 0.82rem; color: var(--text-2); }}
-.status-group .dot {{ width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }}
-.status-group strong {{ color: var(--text); font-weight: 600; }}
-.status-sep {{ width: 1px; height: 16px; background: var(--border); }}
-.status-total {{ font-size: 0.78rem; color: var(--text-3); margin-left: auto; }}
-
-/* ── Controls ──────────────────────────────────────────── */
-.controls {{
-  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
-  margin-bottom: 36px;
-}}
-.chip {{
-  background: transparent; border: 1px solid var(--border); color: var(--text-2);
-  padding: 4px 12px; border-radius: 20px; font-size: 0.75rem; cursor: pointer;
+.sidebar.collapsed .sidebar-filters {{ display: none; }}
+.filter-chip {{
+  background: transparent; border: 1px solid var(--border); color: var(--text-3);
+  padding: 4px 11px; border-radius: 16px; font-size: 0.75rem; cursor: pointer;
   font-family: inherit; font-weight: 500; transition: all 0.15s;
 }}
-.chip:hover {{ background: var(--surface-hover); color: var(--text); }}
-.chip:focus-visible {{ outline: 2px solid var(--progress); outline-offset: 2px; }}
-.chip.active {{ background: var(--text); color: var(--bg); border-color: var(--text); }}
-.chip .chip-count {{ opacity: 0.6; font-weight: 400; margin-left: 2px; }}
-.chip.active .chip-count {{ opacity: 0.7; }}
-.controls-right {{ margin-left: auto; display: flex; gap: 6px; align-items: center; }}
-.sort-select {{
-  background: var(--surface); border: 1px solid var(--border); color: var(--text-2);
-  padding: 5px 10px; border-radius: 8px; font-size: 0.75rem; font-family: inherit;
-  cursor: pointer;
-}}
-.sort-select:focus-visible {{ outline: 2px solid var(--progress); outline-offset: 2px; }}
-.search-input {{
-  background: var(--surface); border: 1px solid var(--border); color: var(--text);
-  padding: 5px 12px; border-radius: 8px; font-size: 0.78rem; font-family: inherit;
-  min-width: 170px; flex: 1; outline: none; transition: border-color 0.15s;
-}}
-.search-input:focus {{ border-color: var(--text-3); }}
-.search-input:focus-visible {{ outline: 2px solid var(--progress); outline-offset: 2px; }}
-.bulk-btns {{ display: flex; gap: 4px; }}
-.bulk-btn {{
-  background: var(--surface); border: 1px solid var(--border); color: var(--text-2);
-  padding: 5px 10px; border-radius: 8px; font-size: 0.75rem; cursor: pointer;
-  font-family: inherit; transition: all 0.15s;
-}}
-.bulk-btn:hover {{ background: var(--surface-hover); color: var(--text); }}
-.bulk-btn:focus-visible {{ outline: 2px solid var(--progress); outline-offset: 2px; }}
+.filter-chip:hover {{ background: var(--surface-hover); color: var(--text-2); border-color: var(--border-2); }}
+.filter-chip.active {{ background: var(--text); color: var(--bg); border-color: var(--text); }}
 
-/* ── Empty state ───────────────────────────────────────── */
-.empty-state {{
-  text-align: center; padding: 48px 24px; color: var(--text-3); font-size: 0.85rem;
-  display: none;
+/* Project List */
+.project-list {{ flex: 1; overflow-y: auto; padding: 6px 0; }}
+.project-item {{
+  padding: 13px 20px; cursor: pointer; transition: background 0.1s;
+  border-left: 2px solid transparent;
 }}
-.empty-state.visible {{ display: block; }}
+.project-item:hover {{ background: var(--surface-hover); }}
+.project-item.selected {{
+  background: var(--surface-2);
+  border-left-color: var(--progress);
+}}
+.sidebar.collapsed .project-item {{
+  padding: 6px 0; display: flex; justify-content: center; border-left: none;
+}}
+.project-name-row {{
+  display: flex; justify-content: space-between; align-items: center; gap: 8px;
+}}
+.sidebar.collapsed .project-name-row {{ display: none; }}
+.project-name {{ font-weight: 600; font-size: var(--step-0); color: var(--text-2); }}
+.project-item.selected .project-name {{ color: var(--text); }}
+.project-status {{
+  font-size: 0.625rem; font-weight: 600; padding: 2px 8px; border-radius: 4px;
+  text-transform: uppercase; letter-spacing: 0.04em; white-space: nowrap;
+  display: flex; align-items: center; gap: 3px; cursor: pointer; transition: filter 0.15s;
+}}
+.project-status:hover {{ filter: brightness(1.2); }}
+.project-status .dd {{ font-size: 7px; opacity: 0.5; }}
+.project-last-session {{
+  font-size: 0.78rem; color: var(--text-3); margin-top: 4px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 1.4;
+}}
+.sidebar.collapsed .project-last-session {{ display: none; }}
+.project-time {{ font-size: 0.72rem; color: var(--text-4); margin-top: 3px; }}
+.sidebar.collapsed .project-time {{ display: none; }}
 
-/* ── Folder ────────────────────────────────────────────── */
-.folder {{
-  margin-bottom: 2px;
-  border-bottom: 1px solid var(--border);
+/* Collapsed Avatars */
+.project-avatar {{
+  display: none; width: 36px; height: 36px; border-radius: var(--radius);
+  background: var(--surface-2); place-items: center; font-size: 0.72rem;
+  font-weight: 600; color: var(--text-2); position: relative; cursor: pointer;
+  transition: background 0.15s;
 }}
-.folder:last-child {{ border-bottom: none; }}
-.folder-header {{
-  display: flex; align-items: center; gap: 10px;
-  padding: 11px 4px; cursor: pointer; user-select: none;
+.project-avatar:hover {{ background: var(--surface-hover); }}
+.sidebar.collapsed .project-avatar {{ display: grid; }}
+.project-item.selected .project-avatar {{ background: var(--progress-bg); color: var(--progress); }}
+.avatar-dot {{
+  position: absolute; bottom: 0; right: 0; width: 9px; height: 9px;
+  border-radius: 50%; border: 2px solid var(--surface);
 }}
-.folder-header:hover {{ background: var(--surface-hover); border-radius: 6px; }}
-.folder-header:focus-visible {{ outline: 2px solid var(--progress); outline-offset: 2px; border-radius: 6px; }}
-.folder-arrow {{
-  width: 16px; height: 16px; display: grid; place-items: center;
-  font-size: 10px; color: var(--text-3); transition: transform 0.15s;
-}}
-.folder-arrow::before {{ content: "\\25B6"; }}
-.folder.open .folder-arrow {{ transform: rotate(90deg); }}
-.folder-path {{ font-weight: 600; font-size: 1rem; flex: 1; }}
-.folder-meta {{ display: flex; align-items: center; gap: 6px; }}
-.fpill {{
-  display: inline-flex; align-items: center; justify-content: center;
-  min-width: 20px; height: 20px; padding: 0 6px;
-  border-radius: 10px; font-size: 0.7rem; font-weight: 600;
-}}
-.fpill.progress {{ background: var(--progress-bg); color: var(--progress); }}
-.fpill.blocked {{ background: var(--blocked-bg); color: var(--blocked); }}
-.fpill.handed {{ background: var(--handed-bg); color: var(--handed); }}
-.folder-info {{ font-size: 0.75rem; color: var(--text-3); }}
-.folder-body {{ display: none; padding: 0 0 6px 0; }}
-.folder.open .folder-body {{ display: block; }}
 
-/* ── Session Row ───────────────────────────────────────── */
-.session {{ border-radius: 6px; margin: 1px 0; }}
-.session.filter-hidden, .session.search-hidden {{ display: none; }}
-.session-row {{
-  display: flex; align-items: center; gap: 10px;
-  padding: 7px 8px 7px 28px; cursor: pointer; border-radius: 6px;
+/* Inactive Section */
+.inactive-section {{ border-top: 1px solid var(--border); }}
+.inactive-toggle {{
+  padding: 10px 20px; color: var(--text-4); font-size: 0.78rem; cursor: pointer;
+  display: flex; align-items: center; gap: 6px; transition: color 0.15s; user-select: none;
+}}
+.inactive-toggle:hover {{ color: var(--text-3); }}
+.sidebar.collapsed .inactive-toggle {{ padding: 6px 0; justify-content: center; }}
+.sidebar.collapsed .inactive-label {{ display: none; }}
+.inactive-arrow {{ font-size: 9px; transition: transform 0.2s; display: inline-block; }}
+.inactive-section.open .inactive-arrow {{ transform: rotate(90deg); }}
+.inactive-list {{ display: none; }}
+.inactive-section.open .inactive-list {{ display: block; }}
+.inactive-list .project-item {{ opacity: 0.4; }}
+.inactive-list .project-item:hover {{ opacity: 0.65; }}
+
+/* Sidebar Footer */
+.sidebar-footer {{
+  padding: 12px 20px; border-top: 1px solid var(--border);
+  display: flex; align-items: center; gap: 8px;
+}}
+.sidebar.collapsed .sidebar-footer {{ justify-content: center; padding: 12px 0; }}
+.sidebar.collapsed .footer-label {{ display: none; }}
+.theme-btn {{
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: 6px;
+  width: 30px; height: 30px; cursor: pointer; display: grid; place-items: center;
+  font-size: 14px; color: var(--text-3); flex-shrink: 0; transition: all 0.15s;
+}}
+.theme-btn:hover {{ background: var(--surface-hover); color: var(--text-2); }}
+.footer-label {{ font-size: 0.72rem; color: var(--text-4); }}
+
+/* ── Detail Panel ──────────────────────────────────────── */
+.detail {{ flex: 1; overflow-y: auto; background: var(--bg); }}
+.detail-inner {{ max-width: 780px; padding: 40px 48px; }}
+.detail-header {{ margin-bottom: 32px; }}
+.detail-top-row {{
+  display: flex; justify-content: space-between; align-items: flex-start; gap: 16px;
+}}
+.detail-project-name {{
+  font-family: 'Source Serif 4', 'Georgia', serif;
+  font-size: var(--step-3); font-weight: 600; letter-spacing: -0.02em; line-height: 1.2;
+}}
+.detail-project-path {{
+  color: var(--text-4); font-size: 0.78rem; margin-top: 6px;
+  font-family: 'SFMono-Regular', 'Cascadia Code', Consolas, monospace;
+}}
+.detail-badge {{
+  padding: 4px 14px; border-radius: 5px; font-size: 0.68rem; font-weight: 600;
+  flex-shrink: 0; text-transform: uppercase; letter-spacing: 0.04em; cursor: pointer;
+  display: flex; align-items: center; gap: 4px; transition: all 0.15s;
+}}
+.detail-badge:hover {{ filter: brightness(1.15); }}
+.detail-badge .dd {{ font-size: 8px; opacity: 0.5; }}
+
+/* Section Labels */
+.section-label {{
+  font-size: 0.7rem; font-weight: 600; text-transform: uppercase;
+  letter-spacing: 0.08em; color: var(--text-3); margin-bottom: 12px;
+}}
+
+/* ── Summary Sections ──────────────────────────────────── */
+.summary-sections {{
+  margin-bottom: 32px; display: flex; flex-direction: column; gap: 20px;
+}}
+.summary-block {{ display: flex; gap: 14px; }}
+.summary-bar {{ width: 3px; border-radius: 2px; flex-shrink: 0; }}
+.summary-block-label {{ font-size: 0.78rem; font-weight: 600; margin-bottom: 6px; }}
+.summary-block-content {{
+  font-size: var(--step-0); color: var(--text-2); line-height: 1.65;
+}}
+.summary-block-content ul {{ padding-left: 18px; margin: 0; }}
+.summary-block-content li {{ margin-bottom: 3px; }}
+.summary-block-content p {{ margin: 4px 0; }}
+.summary-block-content code {{
+  background: var(--surface-2); padding: 1px 6px; border-radius: 4px;
+  font-size: 0.82em; color: var(--blocked);
+  font-family: 'SFMono-Regular', 'Cascadia Code', Consolas, monospace;
+}}
+
+/* Session Meta */
+.session-meta-row {{
+  color: var(--text-4); font-size: 0.78rem; margin-bottom: 32px;
+  display: flex; align-items: center; gap: 8px;
+}}
+.meta-dot {{
+  width: 3px; height: 3px; border-radius: 50%; background: var(--text-4); flex-shrink: 0;
+}}
+
+/* ── Next Steps Card ───────────────────────────────────── */
+.next-steps {{
+  background: var(--surface); border-radius: 10px; padding: 20px 24px;
+  margin-bottom: 40px; border: 1px solid var(--border);
+}}
+.next-steps-label {{
+  font-size: 0.7rem; font-weight: 600; text-transform: uppercase;
+  letter-spacing: 0.08em; color: var(--text-3); margin-bottom: 10px;
+}}
+.next-steps ul {{
+  color: var(--text-2); font-size: var(--step-0); line-height: 1.75; padding-left: 18px;
+}}
+.next-steps li {{ margin-bottom: 3px; }}
+.next-steps li::marker {{ color: var(--text-4); }}
+
+/* ── Recent Sessions Timeline ──────────────────────────── */
+.recent-sessions {{ margin-bottom: 40px; }}
+.recent-header {{
+  display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px;
+}}
+.detail-filters {{ display: flex; gap: 4px; }}
+.detail-filter {{
+  background: transparent; border: 1px solid var(--border); color: var(--text-4);
+  padding: 3px 9px; border-radius: 12px; font-size: 0.68rem; cursor: pointer;
+  font-family: inherit; font-weight: 500; transition: all 0.15s;
+}}
+.detail-filter:hover {{ color: var(--text-3); border-color: var(--border-2); }}
+.detail-filter.active {{ background: var(--surface-2); color: var(--text-2); border-color: var(--border-2); }}
+
+.session-timeline {{
+  position: relative; padding-left: 20px;
+}}
+.session-timeline::before {{
+  content: ''; position: absolute; left: 3px; top: 8px; bottom: 8px;
+  width: 1.5px; background: linear-gradient(to bottom, var(--border-2), var(--border), transparent);
+}}
+.timeline-item {{
+  position: relative; padding: 10px 14px; margin-bottom: 2px;
+  border-radius: var(--radius); cursor: pointer; transition: background 0.1s;
+}}
+.timeline-item:hover {{ background: var(--surface); }}
+.timeline-item.filter-hidden {{ display: none; }}
+.timeline-item::before {{
+  content: ''; position: absolute; left: -17px; top: 16px;
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--border-2); border: 2px solid var(--bg);
+}}
+.timeline-item:first-child::before {{
+  background: var(--progress); box-shadow: 0 0 0 3px var(--progress-bg);
+}}
+.timeline-top {{
+  display: flex; justify-content: space-between; align-items: center; gap: 12px;
+}}
+.timeline-title {{ color: var(--text-2); font-size: var(--step-0); font-weight: 500; }}
+.timeline-item:first-child .timeline-title {{ color: var(--text); font-weight: 600; }}
+.timeline-badge {{
+  padding: 2px 8px; border-radius: 4px; font-size: 0.6rem; font-weight: 600;
+  flex-shrink: 0; text-transform: uppercase; letter-spacing: 0.03em;
+  display: flex; align-items: center; gap: 3px; cursor: pointer; transition: filter 0.15s;
+}}
+.timeline-badge:hover {{ filter: brightness(1.2); }}
+.timeline-badge .dd {{ font-size: 6px; opacity: 0.5; }}
+.timeline-meta {{
+  color: var(--text-4); font-size: 0.75rem; margin-top: 3px;
+  display: flex; align-items: center; gap: 6px;
+}}
+
+/* Expanded Timeline Session */
+.timeline-expansion {{
+  max-height: 0; overflow: hidden;
+  transition: max-height 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+}}
+.timeline-item.expanded .timeline-expansion {{ max-height: 800px; }}
+.timeline-expansion-inner {{
+  background: var(--surface); border-radius: var(--radius);
+  padding: 14px 18px; margin-top: 10px; border: 1px solid var(--border);
+}}
+.timeline-expansion-text {{
+  color: var(--text-2); font-size: 0.82rem; line-height: 1.65; margin-bottom: 8px;
+}}
+.timeline-expansion-text .summary-block {{ margin-bottom: 12px; }}
+.timeline-expansion-text .summary-block-label {{ font-size: 0.72rem; }}
+.timeline-expansion-text .summary-block-content {{ font-size: 0.8rem; }}
+.timeline-expansion-text code {{
+  background: var(--surface-2); padding: 1px 5px; border-radius: 3px;
+  font-size: 0.82em; color: var(--text-2);
+  font-family: 'SFMono-Regular', 'Cascadia Code', Consolas, monospace;
+}}
+
+/* ── Status Dropdown ───────────────────────────────────── */
+.status-dropdown {{
+  position: fixed; z-index: 1000; background: var(--surface);
+  border: 1px solid var(--border-2); border-radius: var(--radius);
+  box-shadow: var(--shadow-md); min-width: 150px; padding: 4px;
+}}
+.status-dropdown-item {{
+  display: flex; align-items: center; gap: 8px; padding: 6px 12px;
+  border-radius: 4px; cursor: pointer; font-size: 0.78rem; color: var(--text-2);
   transition: background 0.1s;
 }}
-.session-row:hover {{ background: var(--surface-hover); }}
-.session-row:focus-visible {{ outline: 2px solid var(--progress); outline-offset: 2px; }}
-.badge {{
-  display: inline-flex; align-items: center;
-  padding: 2px 10px; border-radius: 4px;
-  font-size: 0.7rem; font-weight: 600; text-transform: uppercase;
-  letter-spacing: 0.03em; white-space: nowrap; flex-shrink: 0;
-  min-width: 78px; justify-content: center;
-}}
-.badge.in_progress {{ background: var(--progress-bg); color: var(--progress); }}
-.badge.blocked {{ background: var(--blocked-bg); color: var(--blocked); }}
-.badge.handed_off {{ background: var(--handed-bg); color: var(--handed); }}
-.badge.complete {{ background: var(--complete-bg); color: var(--complete); }}
-.badge.unknown {{
-  background: transparent; color: var(--unknown);
-  border: 1px dashed var(--border); font-weight: 400;
-  text-transform: none; letter-spacing: 0; font-size: 0.7rem;
-  min-width: 78px;
-}}
-.session-title {{
-  flex: 1; font-size: 0.84rem; font-weight: 400;
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  color: var(--text);
-}}
-.session[data-status="complete"] .session-title,
-.session[data-status="handed_off"] .session-title {{ color: var(--text-2); }}
-.session[data-status="unknown"] .session-title {{ color: var(--text-2); }}
-.session-time {{ font-size: 0.75rem; color: var(--text-3); white-space: nowrap; flex-shrink: 0; }}
-.session-msgs {{ font-size: 0.75rem; color: var(--text-3); white-space: nowrap; flex-shrink: 0; min-width: 52px; text-align: right; }}
-.session-chevron {{
-  width: 14px; height: 14px; flex-shrink: 0; display: grid; place-items: center;
-  font-size: 10px; color: var(--text-3); transition: transform 0.2s cubic-bezier(0.16,1,0.3,1);
-}}
-.session-chevron::before {{ content: "\\25B6"; }}
-.session.expanded .session-chevron {{ transform: rotate(90deg); }}
-
-/* ── Session Detail ────────────────────────────────────── */
-.session-detail {{
-  display: grid; grid-template-rows: 0fr;
-  transition: grid-template-rows 0.25s cubic-bezier(0.16,1,0.3,1);
-}}
-.session.expanded .session-detail {{ grid-template-rows: 1fr; }}
-.session-detail-inner {{ overflow: hidden; }}
-.session-detail-inner > div {{ padding: 6px 28px 14px; }}
-.detail-meta {{
-  display: flex; align-items: center; gap: 0; flex-wrap: wrap;
-  font-size: 0.75rem; color: var(--text-3); margin-bottom: 10px;
-  padding-top: 6px; border-top: 1px solid var(--border);
-}}
-.meta-sep {{ width: 1px; height: 12px; background: var(--border); margin: 0 10px; flex-shrink: 0; }}
-.meta-id {{
-  background: none; border: none; color: var(--text-3); font-family: 'SFMono-Regular','Cascadia Code',Consolas,monospace;
-  font-size: 0.7rem; cursor: pointer; padding: 1px 4px; border-radius: 3px; transition: all 0.15s;
-}}
-.meta-id:hover {{ background: var(--surface-hover); color: var(--text-2); }}
-.detail-body {{ font-size: 0.82rem; line-height: 1.65; color: var(--text-2); }}
-.detail-body h2 {{ font-size: 0.85rem; font-weight: 600; color: var(--text); margin: 14px 0 4px; }}
-.detail-body h3 {{ font-size: 0.88rem; font-weight: 600; color: var(--text); margin: 12px 0 4px; }}
-.detail-body ul {{ margin: 4px 0 8px 18px; }}
-.detail-body li {{ margin-bottom: 3px; }}
-.detail-body p {{ margin: 4px 0; }}
-.detail-body code {{ background: var(--code-bg); padding: 1px 5px; border-radius: 3px; font-size: 0.76rem; color: var(--code-text); font-family: 'SFMono-Regular','Cascadia Code',Consolas,monospace; }}
-.detail-body strong {{ color: var(--text); font-weight: 600; }}
-.raw-ask, .raw-resp {{ color: var(--text-2); }}
-.session[data-status="unknown"] .detail-body {{
-  border-left: 3px solid var(--border); padding-left: 14px; margin-left: 2px;
+.status-dropdown-item:hover {{ background: var(--surface-hover); color: var(--text); }}
+.status-dropdown-item .check {{ width: 14px; font-size: 0.7rem; }}
+.status-dropdown-item .swatch {{
+  width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
 }}
 
-/* ── Completed session collapsing ─────────────────────── */
-.folder.completed-hidden .session[data-status="complete"] {{ display: none; }}
-.show-completed-toggle {{
-  width: 100%; padding: 6px 28px;
-  background: none; border: none; border-top: 1px dashed var(--border);
-  color: var(--text-3); font-size: 0.75rem; font-family: inherit;
-  cursor: pointer; text-align: left; margin-top: 2px; transition: color 0.15s;
+/* ── Empty Detail ──────────────────────────────────────── */
+.empty-detail {{
+  color: var(--text-3); font-size: 0.85rem; padding: 60px 24px; text-align: center;
 }}
-.show-completed-toggle:hover {{ color: var(--text-2); }}
-.show-completed-toggle:focus-visible {{ outline: 2px solid var(--progress); outline-offset: 2px; }}
-.folder.completed-hidden .show-completed-toggle::before {{ content: "\\25B6  "; font-size: 0.6rem; }}
-.folder:not(.completed-hidden) .show-completed-toggle::before {{ content: "\\25BC  "; font-size: 0.6rem; }}
 
-/* ── Footer ────────────────────────────────────────────── */
-.footer {{ color: var(--text-3); font-size: 0.7rem; margin-top: 40px; padding-top: 16px; border-top: 1px solid var(--border); }}
+/* ── Animations ────────────────────────────────────────── */
+@media (prefers-reduced-motion: no-preference) {{
+  .detail-inner > * {{
+    animation: fadeUp 0.4s cubic-bezier(0.16, 1, 0.3, 1) backwards;
+  }}
+  .detail-inner > *:nth-child(1) {{ animation-delay: 0.03s; }}
+  .detail-inner > *:nth-child(2) {{ animation-delay: 0.08s; }}
+  .detail-inner > *:nth-child(3) {{ animation-delay: 0.13s; }}
+  .detail-inner > *:nth-child(4) {{ animation-delay: 0.18s; }}
+  .detail-inner > *:nth-child(5) {{ animation-delay: 0.23s; }}
 
-/* ── Responsive ───────────────────────────────────────── */
-@media (max-width: 768px) {{
-  .wrap {{ padding: 16px 12px; }}
-  .header {{ flex-wrap: wrap; gap: 8px; }}
-  .status-strip {{ gap: 12px; }}
-  .controls {{ flex-direction: column; align-items: stretch; gap: 8px; }}
-  .controls-right {{ margin-left: 0; flex-wrap: wrap; }}
-  .search-input {{ min-width: 0; }}
-  .session-row {{ padding-left: 12px; gap: 6px; }}
-  .session-time, .session-msgs {{ display: none; }}
-  .folder-info {{ display: none; }}
+  @keyframes fadeUp {{
+    from {{ opacity: 0; transform: translateY(8px); }}
+    to   {{ opacity: 1; transform: translateY(0); }}
+  }}
+}}
+
+/* ── Responsive ────────────────────────────────────────── */
+@media (max-width: 900px) {{
+  .sidebar {{ width: 56px; }}
+  .sidebar .sidebar-brand {{ opacity: 0; width: 0; }}
+  .sidebar .sidebar-search {{ display: none; }}
+  .sidebar .sidebar-filters {{ display: none; }}
+  .sidebar .project-name-row {{ display: none; }}
+  .sidebar .project-last-session {{ display: none; }}
+  .sidebar .project-time {{ display: none; }}
+  .sidebar .project-avatar {{ display: grid; }}
+  .sidebar .project-item {{ padding: 6px 0; display: flex; justify-content: center; border-left: none; }}
+  .sidebar .sidebar-toggle {{ margin: 0 auto; }}
+  .sidebar .sidebar-toggle .chevron {{ transform: rotate(180deg); }}
+  .sidebar .inactive-toggle {{ padding: 6px 0; justify-content: center; }}
+  .sidebar .inactive-label {{ display: none; }}
+  .sidebar .sidebar-footer {{ justify-content: center; padding: 12px 0; }}
+  .sidebar .footer-label {{ display: none; }}
+  .detail-inner {{ padding: 24px 20px; }}
 }}
 </style>
 </head>
 <body>
-<div class="wrap">
+<div class="layout">
+  <!-- ── Sidebar ── -->
+  <div class="sidebar" id="sidebar">
+    <div class="sidebar-header">
+      <div class="sidebar-brand">
+        <div class="sidebar-title">Session Report</div>
+        <div class="sidebar-sub">Last {days} day{"s" if days != 1 else ""} &middot; {total_projects} project{"s" if total_projects != 1 else ""}</div>
+      </div>
+      <button class="sidebar-toggle" onclick="toggleSidebar()" title="Collapse sidebar">
+        <span class="chevron">&laquo;</span>
+      </button>
+    </div>
 
-<div class="header">
-  <div>
-    <h1>Session Report</h1>
-    <div class="sub">Last {days} day(s) &middot; {now_str}</div>
+    <div class="sidebar-search">
+      <input type="text" class="search-input" placeholder="Search projects... (/)" oninput="searchProjects(this.value)">
+    </div>
+
+    <div class="sidebar-filters">
+      <button class="filter-chip active" onclick="filterProjects('all',this)">All {total_projects}</button>
+      {"<button class='filter-chip' onclick=\"filterProjects('active',this)\">Active " + str(n_active) + "</button>" if n_active else ""}
+      {"<button class='filter-chip' onclick=\"filterProjects('handed_off',this)\">Handed Off " + str(n_handed) + "</button>" if n_handed else ""}
+      {"<button class='filter-chip' onclick=\"filterProjects('blocked',this)\">Blocked " + str(n_blocked) + "</button>" if n_blocked else ""}
+    </div>
+
+    <div class="project-list" id="projectList">
+      {''.join(sidebar_active_items)}
+    </div>
+
+    {inactive_section}
+
+    <div class="sidebar-footer">
+      <button class="theme-btn" onclick="toggleTheme()" title="Toggle theme"><span class="theme-icon">&#9790;</span></button>
+      <span class="footer-label">Dark theme</span>
+    </div>
   </div>
-  <button class="theme-toggle" onclick="toggleTheme()" title="Toggle theme" aria-label="Toggle theme">
-    <span class="theme-icon"></span>
-  </button>
-</div>
 
-<div class="status-strip">
-  <div class="status-group" title="Session is actively being worked on"><span class="dot" style="background:var(--progress)"></span> <strong>{n_progress}</strong> in progress</div>
-  <div class="status-group" title="Session hit a blocker and paused"><span class="dot" style="background:var(--blocked)"></span> <strong>{n_blocked}</strong> blocked</div>
-  <div class="status-group" title="Session ended expecting continuation in a new session"><span class="dot" style="background:var(--handed)"></span> <strong>{n_handed}</strong> handed off</div>
-  <div class="status-group" title="Work in this session is finished"><span class="dot" style="background:var(--complete)"></span> <strong>{n_complete}</strong> complete</div>
-  {"<div class='status-group'><span class='dot' style='background:var(--unknown)'></span> <strong>" + str(n_unknown) + "</strong> unsummarized</div>" if n_unknown else ""}
-  <span class="status-sep"></span>
-  <span class="status-total">{len(all_sessions)} session{"s" if len(all_sessions) != 1 else ""} &middot; {len(by_project)} folder{"s" if len(by_project) != 1 else ""} &middot; {total_msgs:,} messages</span>
-</div>
-
-<div class="controls">
-  <button class="chip active" data-status="all" onclick="filterStatus('all',this)">All <span class="chip-count">{len(all_sessions)}</span></button>
-  <button class="chip" data-status="in_progress" onclick="filterStatus('in_progress',this)">In Progress <span class="chip-count">{n_progress}</span></button>
-  {"<button class='chip' data-status='blocked' onclick=\"filterStatus('blocked',this)\">Blocked <span class='chip-count'>" + str(n_blocked) + "</span></button>" if n_blocked else ""}
-  <button class="chip" data-status="handed_off" onclick="filterStatus('handed_off',this)">Handed Off <span class="chip-count">{n_handed}</span></button>
-  <button class="chip" data-status="complete" onclick="filterStatus('complete',this)">Complete <span class="chip-count">{n_complete}</span></button>
-  {"<button class='chip' data-status='unknown' onclick=\"filterStatus('unknown',this)\">Unsummarized <span class='chip-count'>" + str(n_unknown) + "</span></button>" if n_unknown else ""}
-  <div class="controls-right">
-    <select class="sort-select" onchange="sortSessions(this.value)">
-      <option value="recent">Most Recent</option>
-      <option value="status">By Status</option>
-      <option value="messages">Most Messages</option>
-    </select>
-    <input type="text" class="search-input" placeholder="Search..." oninput="searchSessions(this.value)">
-    <div class="bulk-btns">
-      <button class="bulk-btn" onclick="expandAllFolders()">Expand</button>
-      <button class="bulk-btn" onclick="collapseAllFolders()">Collapse</button>
+  <!-- ── Detail Panel ── -->
+  <div class="detail">
+    <div class="detail-inner" id="detailInner">
+      {first_detail if first_detail else '<div class="empty-detail">No projects found in the last ' + str(days) + ' day(s).</div>'}
     </div>
   </div>
 </div>
 
-<main id="main">
-{''.join(folder_parts)}
-<div class="empty-state" id="emptyState">No sessions match this filter.</div>
-</main>
+<script type="application/json" id="projects-data">{projects_json_str}</script>
+<script type="application/json" id="status-corrections">{{}}</script>
 
-<div class="footer">
-  Summaries by Claude Code &middot; <details style="display:inline"><summary style="cursor:pointer;list-style:none">Technical details</summary>Cache: {str(CACHE_FILE)}</details>
-</div>
-
-</div>
 <script>
-/* Theme */
-(function() {{
-  const saved = localStorage.getItem('sr-theme');
-  const pref = saved || (matchMedia('(prefers-color-scheme:light)').matches ? 'light' : 'dark');
-  document.documentElement.setAttribute('data-theme', pref);
-  updateThemeIcon();
-}})();
+/* ── Constants ─────────────────────────────── */
+const STATUS_VAR = {{'in_progress':'progress','blocked':'blocked','handed_off':'handed','complete':'complete','unknown':'text-3'}};
+const STATUS_LABELS = {{'in_progress':'In Progress','blocked':'Blocked','handed_off':'Handed Off','complete':'Complete','unknown':'Unsummarized'}};
+const STATUS_LIST = ['in_progress','blocked','handed_off','complete'];
+const STATUS_COLORS = {{'in_progress':'--progress','blocked':'--blocked','handed_off':'--handed','complete':'--complete'}};
 
+/* ── State ─────────────────────────────────── */
+let currentProject = 0;
+let projectsData = [];
+try {{ projectsData = JSON.parse(document.getElementById('projects-data').textContent); }} catch(e) {{}}
+
+/* ── Theme ─────────────────────────────────── */
 function toggleTheme() {{
   const el = document.documentElement;
   const next = el.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
   el.setAttribute('data-theme', next);
   localStorage.setItem('sr-theme', next);
-  updateThemeIcon();
+  updateThemeUI();
 }}
 
-function updateThemeIcon() {{
-  const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
+function updateThemeUI() {{
+  const isDark = document.documentElement.getAttribute('data-theme') !== 'light';
   document.querySelectorAll('.theme-icon').forEach(el => el.textContent = isDark ? '\\u2600' : '\\u263E');
+  const label = document.querySelector('.footer-label');
+  if (label) label.textContent = isDark ? 'Dark theme' : 'Light theme';
 }}
 
-/* Folders — open all, but collapse folders with only complete/unknown sessions */
-document.querySelectorAll('.folder').forEach(f => {{
-  const sessions = f.querySelectorAll('.session');
-  const hasActive = [...sessions].some(s => ['in_progress','blocked'].includes(s.dataset.status));
-  if (hasActive || sessions.length === 0) {{
-    f.classList.add('open');
-  }} else {{
-    const hasHandedOff = [...sessions].some(s => s.dataset.status === 'handed_off');
-    if (hasHandedOff) f.classList.add('open');
+/* ── Sidebar Toggle ────────────────────────── */
+function toggleSidebar() {{
+  const sb = document.getElementById('sidebar');
+  sb.classList.toggle('collapsed');
+  localStorage.setItem('sr-sidebar-collapsed', sb.classList.contains('collapsed'));
+}}
+
+/* ── Project Selection ─────────────────────── */
+function selectProject(index) {{
+  currentProject = index;
+  document.querySelectorAll('.project-item').forEach(p => p.classList.remove('selected'));
+  const item = document.querySelector('[data-project-index="' + index + '"]');
+  if (item) item.classList.add('selected');
+  renderProjectDetail(index);
+}}
+
+/* ── Render Project Detail (CORE) ──────────── */
+function renderProjectDetail(index) {{
+  const proj = projectsData[index];
+  if (!proj) return;
+  const el = document.getElementById('detailInner');
+  const sv = STATUS_VAR[proj.status] || 'text-3';
+  const label = STATUS_LABELS[proj.status] || proj.status;
+  const badgeStyle = proj.status === 'unknown'
+    ? 'color:var(--text-3);background:transparent;border:1px dashed var(--border)'
+    : 'background:var(--' + sv + '-bg);color:var(--' + sv + ')';
+  const first = proj.sessions && proj.sessions[0];
+
+  let html = '<div class="detail-header"><div class="detail-top-row"><div>' +
+    '<div class="detail-project-name">' + esc(proj.name) + '</div>' +
+    '<div class="detail-project-path">' + esc(proj.short_path) + '</div>' +
+    '</div>' +
+    '<span class="detail-badge" style="' + badgeStyle + '" ' +
+    'onclick="showStatusDropdown(this,\\'' + escAttr(proj.folder) + '\\',event)">' +
+    label + ' <span class="dd">&#9660;</span></span>' +
+    '</div></div>';
+
+  if (first) {{
+    // Summary sections
+    html += '<div class="summary-sections">' + first.summary_html + '</div>';
+
+    // Session meta
+    html += '<div class="session-meta-row">' +
+      '<span>' + esc(first.time_long) + '</span>' +
+      '<span class="meta-dot"></span>' +
+      '<span>' + first.msgs + ' messages</span>' +
+      '<span class="meta-dot"></span>' +
+      '<span>' + esc(first.duration) + '</span></div>';
+
+    // Next steps
+    if (first.next_steps_html) {{
+      html += '<div class="next-steps"><div class="next-steps-label">Next Steps</div>' +
+        first.next_steps_html + '</div>';
+    }}
   }}
-  const header = f.querySelector('.folder-header');
-  if (header) header.setAttribute('aria-expanded', f.classList.contains('open'));
-}});
 
-function handleKey(e, el, fn) {{
-  if (e.key === 'Enter' || e.key === ' ') {{ e.preventDefault(); fn(el); }}
-}}
-function toggleFolder(header) {{
-  const folder = header.closest('.folder');
-  folder.classList.toggle('open');
-  header.setAttribute('aria-expanded', folder.classList.contains('open'));
-}}
-function expandAllFolders() {{
-  document.querySelectorAll('.folder').forEach(f => f.classList.add('open'));
-}}
-function collapseAllFolders() {{
-  document.querySelectorAll('.folder').forEach(f => f.classList.remove('open'));
+  // Recent sessions timeline
+  const sessions = proj.sessions || [];
+  const nAll = sessions.length;
+  const nProg = sessions.filter(s => s.status === 'in_progress').length;
+  const nComp = sessions.filter(s => s.status === 'complete').length;
+
+  html += '<div class="recent-sessions"><div class="recent-header">' +
+    '<div class="section-label" style="margin-bottom:0">Recent Sessions</div>' +
+    '<div class="detail-filters">' +
+    '<button class="detail-filter active" onclick="filterSessions(\\'all\\',this)">All ' + nAll + '</button>';
+  if (nProg) html += '<button class="detail-filter" onclick="filterSessions(\\'in_progress\\',this)">In Progress ' + nProg + '</button>';
+  if (nComp) html += '<button class="detail-filter" onclick="filterSessions(\\'complete\\',this)">Complete ' + nComp + '</button>';
+  html += '</div></div><div class="session-timeline">';
+
+  sessions.forEach(function(sess) {{
+    const sSv = STATUS_VAR[sess.status] || 'text-3';
+    const sLabel = STATUS_LABELS[sess.status] || sess.status;
+    const sBadgeStyle = sess.status === 'unknown'
+      ? 'color:var(--text-3);background:transparent;border:1px dashed var(--border)'
+      : 'background:var(--' + sSv + '-bg);color:var(--' + sSv + ')';
+
+    html += '<div class="timeline-item" data-status="' + sess.status + '" onclick="toggleTimeline(this)">' +
+      '<div class="timeline-top">' +
+      '<span class="timeline-title">' + esc(sess.title) + '</span>' +
+      '<span class="timeline-badge" style="' + sBadgeStyle + '" ' +
+      'onclick="showStatusDropdown(this,\\'' + escAttr(sess.session_id) + '\\',event)">' +
+      sLabel + ' <span class="dd">&#9660;</span></span></div>' +
+      '<div class="timeline-meta">' +
+      '<span>' + esc(sess.time_str) + '</span>' +
+      '<span class="meta-dot"></span>' +
+      '<span>' + sess.msgs + ' msgs</span>' +
+      '<span class="meta-dot"></span>' +
+      '<span>' + esc(sess.duration) + '</span></div>' +
+      '<div class="timeline-expansion"><div class="timeline-expansion-inner">' +
+      '<div class="timeline-expansion-text">' + sess.summary_html + '</div>' +
+      '</div></div></div>';
+  }});
+
+  html += '</div></div>';
+  el.innerHTML = html;
 }}
 
-/* Sessions */
-function toggleSession(row) {{
-  const session = row.closest('.session');
-  session.classList.toggle('expanded');
-  row.setAttribute('aria-expanded', session.classList.contains('expanded'));
+/* ── Helpers ───────────────────────────────── */
+function esc(s) {{ if (!s) return ''; const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }}
+function escAttr(s) {{ return esc(s).replace(/'/g, '&#39;'); }}
+
+/* ── Timeline Toggle ───────────────────────── */
+function toggleTimeline(el) {{ el.classList.toggle('expanded'); }}
+
+/* ── Status Dropdown ───────────────────────── */
+function showStatusDropdown(badgeEl, sessionId, event) {{
+  event.stopPropagation();
+  // Remove existing dropdown
+  const existing = document.querySelector('.status-dropdown');
+  if (existing) {{ existing.remove(); return; }}
+
+  const rect = badgeEl.getBoundingClientRect();
+  const dd = document.createElement('div');
+  dd.className = 'status-dropdown';
+  dd.style.top = (rect.bottom + 4) + 'px';
+  dd.style.left = rect.left + 'px';
+
+  // Determine current status from badge text
+  const currentText = badgeEl.textContent.trim().replace(/\\s*\\u25be\\s*$/, '').replace(/\\s*\\u25bc\\s*$/, '');
+  const currentStatus = Object.keys(STATUS_LABELS).find(k => STATUS_LABELS[k] === currentText) || 'unknown';
+
+  STATUS_LIST.forEach(function(st) {{
+    const item = document.createElement('div');
+    item.className = 'status-dropdown-item';
+    const check = currentStatus === st ? '\\u2713' : '';
+    const colorVar = STATUS_COLORS[st] || '--text-3';
+    item.innerHTML = '<span class="check">' + check + '</span>' +
+      '<span class="swatch" style="background:var(' + colorVar + ')"></span>' +
+      STATUS_LABELS[st];
+    item.onclick = function(e) {{
+      e.stopPropagation();
+      applyStatusCorrection(sessionId, st, badgeEl);
+      dd.remove();
+    }};
+    dd.appendChild(item);
+  }});
+
+  document.body.appendChild(dd);
+  // Close on outside click
+  setTimeout(function() {{
+    document.addEventListener('click', function handler() {{
+      dd.remove();
+      document.removeEventListener('click', handler);
+    }}, {{ once: true }});
+  }}, 0);
 }}
 
-/* Completed session toggle */
-function toggleCompleted(btn) {{
-  const folder = btn.closest('.folder');
-  folder.classList.toggle('completed-hidden');
-  const n = folder.dataset.completeCount || 0;
-  const label = n + ' completed session' + (n == 1 ? '' : 's');
-  btn.textContent = label;
+function applyStatusCorrection(sessionId, newStatus, badgeEl) {{
+  // Update badge visually
+  const sv = STATUS_VAR[newStatus] || 'text-3';
+  const label = STATUS_LABELS[newStatus] || newStatus;
+  if (newStatus === 'unknown') {{
+    badgeEl.style.cssText = 'color:var(--text-3);background:transparent;border:1px dashed var(--border)';
+  }} else {{
+    badgeEl.style.cssText = 'background:var(--' + sv + '-bg);color:var(--' + sv + ')';
+  }}
+  badgeEl.innerHTML = label + ' <span class="dd">&#9660;</span>';
+
+  // Store correction in localStorage
+  let corrections = {{}};
+  try {{ corrections = JSON.parse(localStorage.getItem('sr-corrections') || '{{}}'); }} catch(e) {{}}
+  corrections[sessionId] = newStatus;
+  localStorage.setItem('sr-corrections', JSON.stringify(corrections));
+
+  // Update embedded script block
+  const scriptEl = document.getElementById('status-corrections');
+  if (scriptEl) scriptEl.textContent = JSON.stringify(corrections);
+
+  // Update projects data
+  projectsData.forEach(function(p) {{
+    p.sessions.forEach(function(s) {{
+      if (s.session_id === sessionId) s.status = newStatus;
+    }});
+  }});
 }}
 
-/* Empty state */
-function updateEmptyState() {{
-  const visibleSessions = document.querySelectorAll('.session:not(.filter-hidden):not(.search-hidden)');
-  const el = document.getElementById('emptyState');
-  if (el) el.classList.toggle('visible', visibleSessions.length === 0);
+/* ── Filter Projects (sidebar) ─────────────── */
+function filterProjects(status, btn) {{
+  document.querySelectorAll('.filter-chip').forEach(c => c.classList.remove('active'));
+  if (btn) btn.classList.add('active');
+
+  document.querySelectorAll('.project-item').forEach(function(item) {{
+    const pStatus = item.dataset.status;
+    let show = true;
+    if (status === 'active') {{
+      show = pStatus === 'in_progress' || pStatus === 'blocked';
+    }} else if (status !== 'all') {{
+      show = pStatus === status;
+    }}
+    item.style.display = show ? '' : 'none';
+  }});
 }}
 
-/* Filter by status */
-let activeFilter = 'all';
-function filterStatus(status, btn) {{
-  activeFilter = status;
-  document.querySelectorAll('.chip[data-status]').forEach(c => c.classList.remove('active'));
+/* ── Filter Sessions (detail timeline) ─────── */
+function filterSessions(status, btn) {{
+  const container = btn.closest('.recent-sessions');
+  if (!container) return;
+  container.querySelectorAll('.detail-filter').forEach(c => c.classList.remove('active'));
   btn.classList.add('active');
-  document.querySelectorAll('.session').forEach(s => {{
-    if (status === 'all' || s.dataset.status === status) {{
-      s.classList.remove('filter-hidden');
+
+  container.querySelectorAll('.timeline-item').forEach(function(item) {{
+    if (status === 'all' || item.dataset.status === status) {{
+      item.classList.remove('filter-hidden');
     }} else {{
-      s.classList.add('filter-hidden');
+      item.classList.add('filter-hidden');
     }}
   }});
-  /* When filtering to complete, temporarily unhide completed sessions */
-  document.querySelectorAll('.folder').forEach(f => {{
-    if (status === 'complete') {{
-      f.classList.remove('completed-hidden');
-    }} else if (status === 'all' && f.dataset.completeCount > 0) {{
-      const hasNonComplete = f.querySelectorAll('.session:not([data-status="complete"])').length > 0;
-      if (hasNonComplete) f.classList.add('completed-hidden');
-    }}
-    const visible = f.querySelectorAll('.session:not(.filter-hidden):not(.search-hidden)');
-    f.style.display = visible.length ? '' : 'none';
-    if (visible.length) f.classList.add('open');
-  }});
-  updateEmptyState();
 }}
 
-/* Search */
-function searchSessions(q) {{
-  q = q.toLowerCase().trim();
-  document.querySelectorAll('.folder').forEach(folder => {{
-    const fname = folder.dataset.folder.toLowerCase();
-    let anyVisible = false;
-    folder.querySelectorAll('.session').forEach(s => {{
-      if (!q) {{
-        s.classList.remove('search-hidden');
-        anyVisible = true;
-        return;
-      }}
-      const text = s.textContent.toLowerCase();
-      if (text.includes(q) || fname.includes(q)) {{
-        s.classList.remove('search-hidden');
-        anyVisible = true;
-      }} else {{
-        s.classList.add('search-hidden');
-      }}
+/* ── Search Projects ───────────────────────── */
+function searchProjects(query) {{
+  const q = query.toLowerCase().trim();
+  document.querySelectorAll('.project-item').forEach(function(item) {{
+    if (!q) {{ item.style.display = ''; return; }}
+    const text = item.textContent.toLowerCase();
+    item.style.display = text.includes(q) ? '' : 'none';
+  }});
+}}
+
+/* ── Toggle Inactive Section ───────────────── */
+function toggleInactive() {{
+  const sec = document.getElementById('inactiveSection');
+  if (sec) sec.classList.toggle('open');
+}}
+
+/* ── Initialization ────────────────────────── */
+(function init() {{
+  // Theme
+  const saved = localStorage.getItem('sr-theme');
+  const pref = saved || (matchMedia('(prefers-color-scheme:light)').matches ? 'light' : 'dark');
+  document.documentElement.setAttribute('data-theme', pref);
+  updateThemeUI();
+
+  // Sidebar collapsed state
+  const collapsed = localStorage.getItem('sr-sidebar-collapsed');
+  if (collapsed === 'true') {{
+    document.getElementById('sidebar').classList.add('collapsed');
+  }}
+
+  // Auto-collapse on narrow screens
+  if (window.innerWidth < 900) {{
+    document.getElementById('sidebar').classList.add('collapsed');
+  }}
+
+  // Load corrections from localStorage and merge
+  let corrections = {{}};
+  try {{ corrections = JSON.parse(localStorage.getItem('sr-corrections') || '{{}}'); }} catch(e) {{}}
+  if (Object.keys(corrections).length > 0) {{
+    const scriptEl = document.getElementById('status-corrections');
+    // Merge with embedded corrections
+    let embedded = {{}};
+    try {{ embedded = JSON.parse(scriptEl.textContent || '{{}}'); }} catch(e) {{}}
+    Object.assign(embedded, corrections);
+    scriptEl.textContent = JSON.stringify(embedded);
+    // Apply corrections to data
+    projectsData.forEach(function(p) {{
+      p.sessions.forEach(function(s) {{
+        if (corrections[s.session_id]) s.status = corrections[s.session_id];
+      }});
     }});
-    folder.style.display = anyVisible || !q ? '' : 'none';
-    if (q && anyVisible) folder.classList.add('open');
-  }});
-  updateEmptyState();
-}}
+  }}
 
-/* Sort */
-const STATUS_ORD = {{blocked:0, in_progress:1, handed_off:2, unknown:3, complete:4}};
-function sortSessions(by) {{
-  document.querySelectorAll('.folder-body').forEach(body => {{
-    const sessions = [...body.querySelectorAll('.session')];
-    sessions.sort((a,b) => {{
-      if (by === 'status') return (STATUS_ORD[a.dataset.status]||3) - (STATUS_ORD[b.dataset.status]||3);
-      if (by === 'messages') {{
-        const am = parseInt(a.querySelector('.session-msgs').textContent) || 0;
-        const bm = parseInt(b.querySelector('.session-msgs').textContent) || 0;
-        return bm - am;
-      }}
-      return 0; // recent is default order from Python
-    }});
-    sessions.forEach(s => body.appendChild(s));
-  }});
-}}
+  // Select first project
+  if (projectsData.length > 0) {{
+    // Already rendered server-side, just ensure state is correct
+    currentProject = 0;
+  }}
+}})();
 
-/* Keyboard shortcuts */
+/* ── Keyboard Shortcuts ────────────────────── */
 document.addEventListener('keydown', function(e) {{
   const search = document.querySelector('.search-input');
   if (!search) return;
@@ -1522,11 +1977,8 @@ document.addEventListener('keydown', function(e) {{
   if (e.key === 'Escape') {{
     if (active === search && search.value) {{
       search.value = '';
-      searchSessions('');
+      searchProjects('');
       search.blur();
-    }} else if (activeFilter !== 'all') {{
-      const allChip = document.querySelector('.chip[data-status="all"]');
-      if (allChip) filterStatus('all', allChip);
     }}
   }}
 }});
