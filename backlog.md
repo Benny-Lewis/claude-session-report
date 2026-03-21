@@ -367,6 +367,28 @@ Items marked `[DONE]` have been implemented.
 
 ---
 
+### 31. Add "abandoned" session status
+
+- **Category:** Feature
+- **Source:** User request
+- **Location:** `STATUS_LABELS`, `STATUS_ORDER`, `STATUS_TOOLTIPS`, summarization prompt in `session-report.md`, HTML template (CSS, filter chips, status strip)
+- **Issue:** There's no status for sessions that were started but intentionally dropped — e.g., a wrong approach, an exploratory spike that went nowhere, or a session interrupted and never resumed. These currently show as "in progress" or "handed off" forever, cluttering the active view.
+- **User impact:** Stale sessions pollute the dashboard with false signals of active work. Users can't distinguish "still working on it" from "gave up on this."
+- **Fix:** Add `abandoned` as a valid status alongside the existing five. Needs: a color/badge style (muted red or gray-red), a filter chip, a status-strip dot, inclusion in `STATUS_ORDER` (between `handed_off` and `complete`), a tooltip definition, and updated summarization instructions in `session-report.md` so Claude knows when to assign it.
+
+---
+
+### 32. Include changed files in session summaries
+
+- **Category:** Feature
+- **Source:** Dashboard redesign brainstorming (2026-03-20)
+- **Location:** Summarization prompt in `session-report.md`, HTML template (session expansion)
+- **Issue:** The redesigned dashboard's session expansion view could show which files were changed during a session, but the current AI summaries don't reliably include file lists.
+- **User impact:** Users expanding a session in the timeline can't see at a glance which files were touched — they only get the summary text.
+- **Fix:** Update the summarization prompt in `session-report.md` to instruct Claude to include a "Files changed:" section listing the key files modified during the session. The HTML template would then render these as inline code blocks in the session expansion.
+
+---
+
 ## Reviewer Gap Findings
 
 Issues identified during the cross-document merge that none of the three reviews caught:
