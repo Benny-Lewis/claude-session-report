@@ -1388,12 +1388,12 @@ body {{
 
 /* ── Detail Panel ──────────────────────────────────────── */
 .detail {{ flex: 1; overflow-y: auto; background: var(--bg); position: relative; }}
-/* Theme icon button */
-.theme-text-btn {{
-  background: none; border: none; color: var(--text-3); cursor: pointer;
-  font-size: 1.1rem; padding: 2px 4px; transition: color 0.15s; line-height: 1;
+/* Theme toggle */
+.theme-toggle-btn {{
+  background: none; border: none; cursor: pointer; padding: 0;
+  line-height: 0; opacity: 0.7; transition: opacity 0.15s;
 }}
-.theme-text-btn:hover {{ color: var(--text); }}
+.theme-toggle-btn:hover {{ opacity: 1; }}
 .detail-inner {{ max-width: 780px; padding: 40px 48px; }}
 .detail-header {{ margin-bottom: 32px; }}
 .detail-top-row {{
@@ -1632,7 +1632,7 @@ body {{
 
     <div class="sidebar-footer">
       {f'<label class="inactive-toggle"><input type="checkbox" checked onchange="toggleInactiveVisibility(this)" class="inactive-cb">{n_inactive_proj} inactive</label>' if n_inactive_proj > 0 else ''}
-      <button class="theme-text-btn" onclick="toggleTheme()" title="Toggle theme"><span class="theme-icon">&#9684;</span></button>
+      <button class="theme-toggle-btn" onclick="toggleTheme()" title="Toggle theme" id="themeToggle"></button>
     </div>
   </div>
 
@@ -1660,6 +1660,9 @@ let projectsData = [];
 try {{ projectsData = JSON.parse(document.getElementById('projects-data').textContent); }} catch(e) {{}}
 
 /* ── Theme ─────────────────────────────────── */
+const THEME_SVG_LIGHT = '<svg viewBox="0 0 56 28" width="32" height="16" xmlns="http://www.w3.org/2000/svg"><rect x="1" y="1" width="54" height="26" rx="13" fill="var(--text-3)"/><circle cx="16" cy="14" r="4.5" fill="var(--bg)" opacity="0.85"/><circle cx="18.5" cy="12" r="4" fill="var(--text-3)"/><circle cx="41" cy="14" r="10" fill="var(--bg)"/></svg>';
+const THEME_SVG_DARK = '<svg viewBox="0 0 56 28" width="32" height="16" xmlns="http://www.w3.org/2000/svg"><rect x="1" y="1" width="54" height="26" rx="13" fill="var(--text-3)"/><circle cx="15" cy="14" r="10" fill="var(--bg)"/><circle cx="40" cy="14" r="3.5" fill="var(--bg)" opacity="0.85"/><line x1="40" y1="6.5" x2="40" y2="8.5" stroke="var(--bg)" stroke-width="1.5" stroke-linecap="round"/><line x1="40" y1="19.5" x2="40" y2="21.5" stroke="var(--bg)" stroke-width="1.5" stroke-linecap="round"/><line x1="33.5" y1="14" x2="35.5" y2="14" stroke="var(--bg)" stroke-width="1.5" stroke-linecap="round"/><line x1="44.5" y1="14" x2="46.5" y2="14" stroke="var(--bg)" stroke-width="1.5" stroke-linecap="round"/><line x1="35.3" y1="9.3" x2="36.7" y2="10.7" stroke="var(--bg)" stroke-width="1.5" stroke-linecap="round"/><line x1="43.3" y1="17.3" x2="44.7" y2="18.7" stroke="var(--bg)" stroke-width="1.5" stroke-linecap="round"/><line x1="43.3" y1="9.3" x2="44.7" y2="10.7" stroke="var(--bg)" stroke-width="1.5" stroke-linecap="round"/><line x1="35.3" y1="17.3" x2="36.7" y2="18.7" stroke="var(--bg)" stroke-width="1.5" stroke-linecap="round"/></svg>';
+
 function toggleTheme() {{
   const el = document.documentElement;
   const next = el.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
@@ -1670,7 +1673,8 @@ function toggleTheme() {{
 
 function updateThemeUI() {{
   const isDark = document.documentElement.getAttribute('data-theme') !== 'light';
-  document.querySelectorAll('.theme-icon').forEach(el => el.textContent = isDark ? '\\u263C' : '\\u25D1');
+  const btn = document.getElementById('themeToggle');
+  if (btn) btn.innerHTML = isDark ? THEME_SVG_DARK : THEME_SVG_LIGHT;
 }}
 
 /* ── Sidebar Toggle ────────────────────────── */
