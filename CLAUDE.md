@@ -86,5 +86,5 @@ python claude-session-report.py 1 --no-open   # don't open browser
 ## Backlog
 
 - `backlog.md` — Unified prioritized backlog (P0–P3) merged from code review, UX audit, and design critique
-- Items are numbered 1–30; reference by number (e.g., "backlog #1")
+- Items are numbered 1–30; reference by number (e.g., "backlog #1"). Check backlog.md for completion status.
 - Verify with `python claude-session-report.py 3 no-ai --no-open` after changes, then open the output HTML to spot-check
