@@ -29,18 +29,29 @@ Read the file at `~/.claude/reports/_collect.json`. Check the `needs_summary` fi
 
 ### Step 3: Summarize sessions
 
-For each session in the `sessions` array, read its `transcript` and `cwd` fields and generate a summary using EXACTLY this markdown format:
+For each session in the `sessions` array, read its `transcript` and `cwd` fields and generate a summary using EXACTLY this markdown format.
+
+Each summary MUST use these markdown headings:
 
 ```
-## Summary
-2-3 sentences: What was the main goal or task?
-
 ## What Was Done
 - bullet points of concrete accomplishments
 
-## What's Next
-Where the work left off and what someone picking this up would likely do next.
+## Key Decisions
+- bullet points of non-trivial decisions and their rationale
+
+## Issues Encountered
+- bullet points of problems, errors, or blockers hit during the session
+
+## Next Steps
+- where the work left off and what someone picking this up would likely do next
 ```
+
+Rules for section inclusion:
+- `## What Was Done` is REQUIRED in every summary.
+- `## Key Decisions` — include ONLY if non-trivial decisions were made; omit entirely if none.
+- `## Issues Encountered` — include ONLY if there were problems; omit entirely if none.
+- `## Next Steps` — include ONLY if there are clear follow-ups; omit entirely if the work is fully complete.
 
 Also determine the session's **status** and a short **title**:
 
