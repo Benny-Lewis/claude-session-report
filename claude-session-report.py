@@ -838,25 +838,13 @@ def aggregate_projects(all_sessions, summaries, days):
         for s in sessions:
             status_counts[s["_status"]] += 1
 
-        # Project-level status: heuristic for v1 — priority: blocked > in_progress > handed_off > latest session
-        # NOTE: Spec calls for AI-synthesized project status via --review-statuses pipeline.
-        # This mechanical heuristic is a v1 simplification. A follow-up should update
-        # session-report.md prompt to produce a project_status field during the review pass.
-        project_status = latest_session["_status"]
-        for s in sessions:
-            if s["_status"] == "blocked":
-                project_status = "blocked"
-                break
-            if s["_status"] == "in_progress":
-                project_status = "in_progress"
-                break
-            if s["_status"] == "handed_off" and project_status not in ("in_progress", "blocked"):
-                project_status = "handed_off"
-
         # Active/inactive: inactive if all sessions complete and latest > 24h ago
         all_complete = all(s["_status"] in ("complete", "unknown") for s in sessions)
         latest_time = max(s["latest"] for s in sessions)
         is_inactive = all_complete and latest_time < inactive_threshold
+
+        # Project-level status: simple active vs inactive (session-level statuses remain unchanged)
+        project_status = "inactive" if is_inactive else "active"
 
         # Short name: last component of the path
         short_name = short_path(folder).rstrip("/\\").split("/")[-1].split("\\")[-1]
@@ -905,6 +893,8 @@ def generate_html(all_sessions, summaries, days):
         "handed_off": "handed",
         "complete": "complete",
         "unknown": "text-3",
+        "active": "progress",
+        "inactive": "text-3",
     }
 
     def _time_ago(ts):
@@ -1000,27 +990,23 @@ def generate_html(all_sessions, summaries, days):
     projects_json_str = projects_json_str.replace("</script>", "<\\/script>")
 
     # ── Count statuses for sidebar filter chips ─────────────
-    n_active = sum(1 for p in all_projects if p["status"] in ("in_progress", "blocked"))
-    n_handed = sum(1 for p in all_projects if p["status"] == "handed_off")
-    n_blocked = sum(1 for p in all_projects if p["status"] == "blocked")
+    n_active = sum(1 for p in all_projects if p["status"] == "active")
+    n_inactive_proj = sum(1 for p in all_projects if p["status"] == "inactive")
 
     # ── Build sidebar project items ─────────────────────────
     sidebar_active_items = []
     for i, proj in enumerate(active_projects):
         status = proj["status"]
         sv = STATUS_VAR.get(status, "text-3")
-        label = STATUS_LABELS.get(status, status)
         name_esc = html_escape(proj["name"])
         title_esc = html_escape(proj["last_title"] or "")
         time_ago = _time_ago(proj["latest"])
         n_sess = proj["session_count"]
         selected = " selected" if i == 0 else ""
 
-        # Status badge styling
-        if status == "unknown":
-            badge_style = 'style="color:var(--text-3);background:transparent;border:1px dashed var(--border)"'
-        else:
-            badge_style = f'style="background:var(--{sv}-bg);color:var(--{sv})"'
+        # Project-level status badge styling (active/inactive — not clickable)
+        badge_style = f'style="background:var(--{sv}-bg);color:var(--{sv})"'
+        label = "Active" if status == "active" else "Inactive"
 
         sidebar_active_items.append(
             f'<div class="project-item{selected}" data-project-index="{i}" '
@@ -1029,9 +1015,8 @@ def generate_html(all_sessions, summaries, days):
             f'<div class="avatar-dot" style="background:var(--{sv})"></div></div>'
             f'<div class="project-name-row">'
             f'<span class="project-name">{name_esc}</span>'
-            f'<span class="project-status" {badge_style} '
-            f'onclick="showStatusDropdown(this,\'{html_escape(proj["folder"])}\',event)">'
-            f'{label} <span class="dd">&#9660;</span></span>'
+            f'<span class="project-status" {badge_style}>'
+            f'{label}</span>'
             f'</div>'
             f'<div class="project-last-session">{title_esc}</div>'
             f'<div class="project-time">{html_escape(time_ago)} &middot; {n_sess} session{"s" if n_sess != 1 else ""}</div>'
@@ -1081,26 +1066,22 @@ def generate_html(all_sessions, summaries, days):
         fp = all_projects[0]
         fp_status = fp["status"]
         fp_sv = STATUS_VAR.get(fp_status, "text-3")
-        fp_label = STATUS_LABELS.get(fp_status, fp_status)
-        if fp_status == "unknown":
-            fp_badge_style = 'style="color:var(--text-3);background:transparent;border:1px dashed var(--border)"'
-        else:
-            fp_badge_style = f'style="background:var(--{fp_sv}-bg);color:var(--{fp_sv})"'
+        fp_label = "Active" if fp_status == "active" else "Inactive"
+        fp_badge_style = f'style="background:var(--{fp_sv}-bg);color:var(--{fp_sv})"'
 
         # First session data for the summary
         fp_sessions = projects_json[0]["sessions"] if projects_json else []
         fp_first = fp_sessions[0] if fp_sessions else None
 
         first_detail_parts = []
-        # Header
+        # Header (project-level badge — no dropdown, computed status)
         first_detail_parts.append(
             '<div class="detail-header"><div class="detail-top-row"><div>'
             f'<div class="detail-project-name">{html_escape(fp["name"])}</div>'
             f'<div class="detail-project-path">{html_escape(fp["short_path"])}</div>'
             '</div>'
-            f'<span class="detail-badge" {fp_badge_style} '
-            f'onclick="showStatusDropdown(this,\'{html_escape(fp["folder"])}\',event)">'
-            f'{fp_label} <span class="dd">&#9660;</span></span>'
+            f'<span class="detail-badge" {fp_badge_style}>'
+            f'{fp_label}</span>'
             '</div></div>'
         )
 
@@ -1354,10 +1335,8 @@ body {{
 .project-status {{
   font-size: 0.625rem; font-weight: 600; padding: 2px 8px; border-radius: 4px;
   text-transform: uppercase; letter-spacing: 0.04em; white-space: nowrap;
-  display: flex; align-items: center; gap: 3px; cursor: pointer; transition: filter 0.15s;
+  display: flex; align-items: center; gap: 3px;
 }}
-.project-status:hover {{ filter: brightness(1.2); }}
-.project-status .dd {{ font-size: 7px; opacity: 0.5; }}
 .project-last-session {{
   font-size: 0.78rem; color: var(--text-3); margin-top: 4px;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 1.4;
@@ -1639,8 +1618,7 @@ body {{
     <div class="sidebar-filters">
       <button class="filter-chip active" onclick="filterProjects('all',this)">All {total_projects}</button>
       {"<button class='filter-chip' onclick=\"filterProjects('active',this)\">Active " + str(n_active) + "</button>" if n_active else ""}
-      {"<button class='filter-chip' onclick=\"filterProjects('handed_off',this)\">Handed Off " + str(n_handed) + "</button>" if n_handed else ""}
-      {"<button class='filter-chip' onclick=\"filterProjects('blocked',this)\">Blocked " + str(n_blocked) + "</button>" if n_blocked else ""}
+      {"<button class='filter-chip' onclick=\"filterProjects('inactive',this)\">Inactive " + str(n_inactive_proj) + "</button>" if n_inactive_proj else ""}
     </div>
 
     <div class="project-list" id="projectList">
@@ -1668,8 +1646,8 @@ body {{
 
 <script>
 /* ── Constants ─────────────────────────────── */
-const STATUS_VAR = {{'in_progress':'progress','blocked':'blocked','handed_off':'handed','complete':'complete','unknown':'text-3'}};
-const STATUS_LABELS = {{'in_progress':'In Progress','blocked':'Blocked','handed_off':'Handed Off','complete':'Complete','unknown':'Unsummarized'}};
+const STATUS_VAR = {{'in_progress':'progress','blocked':'blocked','handed_off':'handed','complete':'complete','unknown':'text-3','active':'progress','inactive':'text-3'}};
+const STATUS_LABELS = {{'in_progress':'In Progress','blocked':'Blocked','handed_off':'Handed Off','complete':'Complete','unknown':'Unsummarized','active':'Active','inactive':'Inactive'}};
 const STATUS_LIST = ['in_progress','blocked','handed_off','complete'];
 const STATUS_COLORS = {{'in_progress':'--progress','blocked':'--blocked','handed_off':'--handed','complete':'--complete'}};
 
@@ -1717,18 +1695,16 @@ function renderProjectDetail(index) {{
   const el = document.getElementById('detailInner');
   const sv = STATUS_VAR[proj.status] || 'text-3';
   const label = STATUS_LABELS[proj.status] || proj.status;
-  const badgeStyle = proj.status === 'unknown'
-    ? 'color:var(--text-3);background:transparent;border:1px dashed var(--border)'
-    : 'background:var(--' + sv + '-bg);color:var(--' + sv + ')';
+  const badgeStyle = 'background:var(--' + sv + '-bg);color:var(--' + sv + ')';
   const first = proj.sessions && proj.sessions[0];
 
+  // Project-level badge: Active/Inactive — no dropdown (computed, not user-correctable)
   let html = '<div class="detail-header"><div class="detail-top-row"><div>' +
     '<div class="detail-project-name">' + esc(proj.name) + '</div>' +
     '<div class="detail-project-path">' + esc(proj.short_path) + '</div>' +
     '</div>' +
-    '<span class="detail-badge" style="' + badgeStyle + '" ' +
-    'onclick="showStatusDropdown(this,\\'' + escAttr(proj.folder) + '\\',event)">' +
-    label + ' <span class="dd">&#9660;</span></span>' +
+    '<span class="detail-badge" style="' + badgeStyle + '">' +
+    label + '</span>' +
     '</div></div>';
 
   if (first) {{
@@ -1878,14 +1854,19 @@ function filterProjects(status, btn) {{
 
   document.querySelectorAll('.project-item').forEach(function(item) {{
     const pStatus = item.dataset.status;
-    let show = true;
-    if (status === 'active') {{
-      show = pStatus === 'in_progress' || pStatus === 'blocked';
-    }} else if (status !== 'all') {{
-      show = pStatus === status;
-    }}
+    const show = (status === 'all') || (pStatus === status);
     item.style.display = show ? '' : 'none';
   }});
+
+  // Show/hide the inactive section based on filter
+  const inactiveSec = document.getElementById('inactiveSection');
+  if (inactiveSec) {{
+    if (status === 'active') {{
+      inactiveSec.style.display = 'none';
+    }} else {{
+      inactiveSec.style.display = '';
+    }}
+  }}
 }}
 
 /* ── Filter Sessions (detail timeline) ─────── */
