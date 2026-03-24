@@ -240,7 +240,7 @@ Items marked `[DONE]` have been implemented.
 - **Category:** Privacy / Polish
 - **Source:** Code Review (#11) + UX Audit (Severity 1, #11) + Design Critique (minor)
 - **Location:** Footer element in HTML template
-- **Issue:** Footer shows `Cache: C:\Users\Ben\.claude\session-report-cache.json` — a system implementation detail. Acceptable for a local tool, but would leak information if reports are ever shared.
+- **Issue:** Footer shows the full cache file path — a system implementation detail. Acceptable for a local tool, but would leak information if reports are ever shared.
 - **User impact:** Cosmetic — visual noise for normal viewing, though useful for debugging.
 - **Fix:** Either remove or wrap in a `<details>` toggle for "technical details."
 

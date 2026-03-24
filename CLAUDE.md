@@ -89,21 +89,6 @@ cp session-report.md ~/.claude/commands/session-report.md
 ```
 Verify with `python claude-session-report.py 3 --no-open`, then preview with Playwright via local HTTP server.
 
-## QA Report
-
-- `docs/reviews/redesign-qa-report.md` — Root cause analysis of 11 bugs/issues from the dashboard redesign (2026-03-21). Covers encoding (B1), inactive threshold (D1), Home display (B2), and pipeline issues (P1-P3). Most items fixed.
-
-## UX/Design Review Documents
-
-- `docs/reviews/ux-audit-report.md` — Heuristic evaluation (accessibility, usability). 15 findings rated severity 0–4
-- `docs/reviews/design-critique-report.md` — Design director critique (visual hierarchy, information architecture, composition). 5 priority issues
-- Both reference specific CSS classes, line numbers, and provide concrete fix recommendations
-- **Implement fixes in the Python script**, not the output HTML
-
-## Code Review
-
-- `docs/reviews/code-review-findings.md` — Full code review (2026-03-20). 2 critical, 4 important, 6 minor findings.
-
 ## Backlog
 
 - `backlog.md` — Unified prioritized backlog (P0–P3) merged from code review, UX audit, and design critique

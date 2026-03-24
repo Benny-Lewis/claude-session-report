@@ -20,3 +20,5 @@ build/
 .playwright-mcp/
 .superpowers/
 screenshots/
+docs/reviews/
+.claude/settings.local.json
