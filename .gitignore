@@ -19,3 +19,4 @@ build/
 # Project-specific
 .playwright-mcp/
 .superpowers/
+screenshots/

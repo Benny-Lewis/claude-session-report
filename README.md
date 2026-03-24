@@ -2,8 +2,6 @@
 
 A reporting tool for [Claude Code](https://docs.anthropic.com/en/docs/claude-code) that scans all your sessions across every project on your machine, generates AI-powered summaries, and renders an HTML dashboard showing what was worked on, status, and next steps.
 
-![Dashboard screenshot](screenshots/redesign-final-overview.png)
-
 ## Features
 
 - Scans all Claude Code session transcripts across every project
